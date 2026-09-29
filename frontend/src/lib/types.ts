@@ -74,6 +74,7 @@ export interface DivergenceAlert {
 export interface SearchResult {
   query: string | object;
   matchCount: number;
+  isZeroDay?: boolean;
   primaryIncident: Incident | null;
   primaryConfidence: number;
   divergenceAlert: DivergenceAlert | null;

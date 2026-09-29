@@ -19,7 +19,8 @@ import {
   Terminal,
   Activity,
   Layers,
-  Download
+  Download,
+  Lightbulb
 } from 'lucide-react';
 import {
   Incident,
@@ -37,30 +38,8 @@ interface ChatMessage {
   feedback?: Record<string, { status: 'worked' | 'failed'; reason?: string }>;
 }
 
-const SAMPLE_PROMPTS = [
-  {
-    title: 'Payments Connection Pool',
-    query: 'payments-service: Postgres connection timeout spike (active pg_connections 100/100, p99 > 8500ms, HTTP 504 on /api/v2/charge)'
-  },
-  {
-    title: 'Catalog Cache Storm',
-    query: 'catalog-search: Upstream DB query timeouts, HTTP 503 error rate > 48% on /search/items with Redis memory at 99.9%'
-  },
-  {
-    title: 'Checkout CPU 99% Scan',
-    query: 'checkout-api: Postgres CPU 99.8% (Saturation), query latency > 14000ms on SELECT * FROM orders WHERE status = PENDING'
-  },
-  {
-    title: 'Auth 401 JWKS Desync',
-    query: 'auth-gateway: 401 Unauthorized spike (68% failure rate), JWT kid not found in cached JWKS'
-  },
-  {
-    title: 'Billing Kafka Poison Pill',
-    query: 'billing-worker: Consumer group lag > 320,000 msgs on topic payments.settled, worker CPU 100% on partition 4'
-  }
-];
-
 export default function ChatbotIncidentAgent() {
+  const [isMounted, setIsMounted] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -75,6 +54,7 @@ export default function ChatbotIncidentAgent() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
+    setIsMounted(true);
     fetchIncidents();
   }, []);
 
@@ -89,6 +69,18 @@ export default function ChatbotIncidentAgent() {
       setAllIncidents(data.incidents || []);
     } catch (e) {
       console.error('Failed to load incidents', e);
+    }
+  };
+
+  const handleClearDatabase = async () => {
+    if (!window.confirm('Are you sure you want to completely wipe all incidents from database memory?')) return;
+    try {
+      await fetch('/api/incidents', { method: 'DELETE' });
+      setAllIncidents([]);
+      setMessages([]);
+      setShowArchive(false);
+    } catch (e) {
+      console.error('Failed to clear memory', e);
     }
   };
 
@@ -111,7 +103,13 @@ export default function ChatbotIncidentAgent() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: query })
+        body: JSON.stringify({
+          message: query,
+          history: messages.map(m => ({
+            role: m.role,
+            content: m.content || m.searchResult?.primaryIncident?.title || ''
+          }))
+        })
       });
       const data = await res.json();
 
@@ -135,9 +133,13 @@ export default function ChatbotIncidentAgent() {
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
       } else {
+        if (data.searchResult?.isZeroDay) {
+          fetchIncidents();
+        }
         assistantMessage = {
           id: `asst_${Date.now()}`,
           role: 'assistant',
+          content: data.text,
           searchResult: data.searchResult,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
@@ -240,7 +242,7 @@ export default function ChatbotIncidentAgent() {
 
     // Find the message to get incident ID
     const targetMsg = messages.find(m => m.id === messageId);
-    const incidentId = targetMsg?.searchResult?.primaryIncident?.id || 'INC-402';
+    const incidentId = targetMsg?.searchResult?.primaryIncident?.id || allIncidents[0]?.id || '';
 
     try {
       await fetch('/api/mitigations/feedback', {
@@ -310,7 +312,7 @@ export default function ChatbotIncidentAgent() {
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-colors"
           >
             <Database className="w-3.5 h-3.5 text-indigo-400" />
-            <span>{allIncidents.length} Postmortems</span>
+            <span suppressHydrationWarning>{isMounted ? allIncidents.length : 0} Postmortems</span>
           </button>
 
           {messages.length > 0 && (
@@ -343,30 +345,45 @@ export default function ChatbotIncidentAgent() {
               Paste an alert signature, describe an outage, or ask how to resolve an issue. I check historical postmortems to recommend verified fixes, flag dangerous pitfalls, and update memory with your feedback.
             </p>
 
-            <div className="w-full flex flex-col gap-2 max-w-lg text-left">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-1">
-                Try a simulated incident alert:
-              </span>
-              <div className="flex flex-col gap-2">
-                {SAMPLE_PROMPTS.map((sample, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => handleSend(sample.query)}
-                    className="group bg-slate-900/60 hover:bg-slate-800/80 border border-slate-800/80 hover:border-slate-700 p-3 rounded-xl text-left transition-all flex items-center justify-between gap-3 text-xs"
-                  >
-                    <div>
-                      <span className="font-semibold text-white group-hover:text-indigo-300 transition-colors block">
-                        {sample.title}
-                      </span>
-                      <span className="text-[11px] text-slate-400 line-clamp-1">
-                        {sample.query}
-                      </span>
-                    </div>
-                    <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-white shrink-0 group-hover:translate-x-0.5 transition-transform" />
-                  </button>
-                ))}
+            {allIncidents.length > 0 ? (
+              <div className="w-full flex flex-col gap-2 max-w-lg text-left">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-1">
+                  Active Database Memories ({allIncidents.length}):
+                </span>
+                <div className="flex flex-col gap-2">
+                  {allIncidents.slice(0, 5).map(inc => {
+                    const alertQuery = inc.alertSignatures?.[0] || `${inc.service}: ${inc.title}`;
+                    return (
+                      <button
+                        key={inc.id}
+                        onClick={() => handleSend(alertQuery)}
+                        className="group bg-slate-900/60 hover:bg-slate-800/80 border border-slate-800/80 hover:border-slate-700 p-3 rounded-xl text-left transition-all flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold">
+                              {inc.id}
+                            </span>
+                            <span className="font-semibold text-white group-hover:text-indigo-300 transition-colors">
+                              {inc.service}: {inc.title}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-400 line-clamp-1 font-mono">
+                            {alertQuery}
+                          </span>
+                        </div>
+                        <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-white shrink-0 group-hover:translate-x-0.5 transition-transform" />
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="w-full max-w-md p-4 rounded-xl bg-slate-900/40 border border-slate-800/80 text-center text-xs text-slate-400">
+                <p className="font-medium text-slate-300 mb-1">Persistent Database Memory is Active (0 stored incidents)</p>
+                <p className="text-[11px] text-slate-500">Paste any production error, stack trace, or alert message to analyze and triage zero-day incidents.</p>
+              </div>
+            )}
           </div>
         )}
 
@@ -413,12 +430,20 @@ export default function ChatbotIncidentAgent() {
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono font-bold text-emerald-400">
-                          {msg.searchResult.primaryConfidence}% Match
-                        </span>
+                        {msg.searchResult.isZeroDay ? (
+                          <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                            <Sparkles className="w-3 h-3" />
+                            NEW INCIDENT • AI HYPOTHESIS
+                          </span>
+                        ) : (
+                          <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            HISTORICAL PRECEDENT MATCHED • {msg.searchResult.primaryConfidence || 100}% Experience
+                          </span>
+                        )}
                         <button
                           onClick={() => openPostmortem(msg.searchResult!.primaryIncident!.id)}
-                          className="text-[11px] font-medium text-sky-400 hover:text-sky-300 underline flex items-center gap-1"
+                          className="text-[11px] font-medium text-sky-400 hover:text-sky-300 underline flex items-center gap-1 ml-1"
                         >
                           <FileText className="w-3 h-3" />
                           <span>Postmortem</span>
@@ -430,9 +455,9 @@ export default function ChatbotIncidentAgent() {
                       {msg.searchResult.primaryIncident.title}
                     </h2>
 
-                    <div className="bg-slate-950/60 border-l-2 border-indigo-400 p-2.5 rounded-r text-xs text-slate-300 leading-relaxed">
-                      <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block mb-0.5">
-                        Historical Root Cause
+                    <div className={`bg-slate-950/60 border-l-2 ${msg.searchResult.isZeroDay ? 'border-amber-400' : 'border-indigo-400'} p-2.5 rounded-r text-xs text-slate-300 leading-relaxed`}>
+                      <span className={`text-[10px] font-bold ${msg.searchResult.isZeroDay ? 'text-amber-400' : 'text-indigo-400'} uppercase tracking-wider block mb-0.5`}>
+                        {msg.searchResult.isZeroDay ? 'AI Diagnostic Hypothesis (Zero-Day)' : 'Historical Root Cause (Verified in Memory)'}
                       </span>
                       {msg.searchResult.primaryIncident.rootCause}
                     </div>
@@ -460,13 +485,13 @@ export default function ChatbotIncidentAgent() {
 
                 {/* Verified Mitigations with Feedback Buttons */}
                 <div className="flex flex-col gap-2.5">
-                  <div className="flex items-center justify-between text-xs font-semibold text-emerald-400">
+                  <div className={`flex items-center justify-between text-xs font-semibold ${msg.searchResult.isZeroDay ? 'text-amber-400' : 'text-emerald-400'}`}>
                     <span className="flex items-center gap-1.5">
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>Verified Fixes (Empirically Ranked)</span>
+                      {msg.searchResult.isZeroDay ? <Lightbulb className="w-4 h-4 text-amber-400" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
+                      <span>{msg.searchResult.isZeroDay ? 'Proposed Solutions to Try (Click "Worked" on what solves it)' : 'Verified Fixes (Empirically Proven in Memory)'}</span>
                     </span>
                     <span className="text-[10px] text-slate-400 font-mono font-normal">
-                      Click feedback to update agent memory
+                      {msg.searchResult.isZeroDay ? 'Click feedback or reply in chat' : 'Grounded in past resolved outages'}
                     </span>
                   </div>
 
@@ -483,9 +508,15 @@ export default function ChatbotIncidentAgent() {
                       >
                         <div className="flex items-center justify-between text-xs">
                           <span className="font-bold text-white">#{idx + 1} {fix.action}</span>
-                          <span className="font-mono text-[11px] text-emerald-400">
-                            {successPct}% success ({fix.avgResolutionMinutes}m MTTR)
-                          </span>
+                          {msg.searchResult?.isZeroDay || (fix.timesWorked || 0) === 0 ? (
+                            <span className="font-mono text-[11px] text-amber-400">
+                              Trial / Proposed
+                            </span>
+                          ) : (
+                            <span className="font-mono text-[11px] text-emerald-400">
+                              {successPct}% success ({fix.timesWorked || 1} prior {fix.timesWorked === 1 ? 'fix' : 'fixes'})
+                            </span>
+                          )}
                         </div>
 
                         {/* Command Code Box */}
@@ -519,7 +550,7 @@ export default function ChatbotIncidentAgent() {
                           ) : (
                             <div className="flex items-center gap-1.5">
                               <button
-                                onClick={() => recordFeedbackWorked(msg.id, msg.searchResult!.primaryIncident?.id || 'INC-402', fix.id, fix.action)}
+                                onClick={() => recordFeedbackWorked(msg.id, msg.searchResult!.primaryIncident?.id || allIncidents[0]?.id || '', fix.id, fix.action)}
                                 className="px-2.5 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-medium text-[11px] border border-emerald-500/30 flex items-center gap-1 transition-colors"
                               >
                                 <ThumbsUp className="w-3 h-3" />
@@ -627,13 +658,15 @@ export default function ChatbotIncidentAgent() {
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Paste a production alert, describe an outage, or ask for incident recommendations..."
+              suppressHydrationWarning
               className="w-full bg-transparent px-4 py-3 text-xs text-white placeholder-slate-500 focus:outline-none resize-none max-h-32"
             />
             <button
               onClick={() => handleSend()}
-              disabled={!input.trim() || isLoading}
+              disabled={isMounted ? (!input.trim() || isLoading) : undefined}
+              suppressHydrationWarning
               className={`mr-2 p-2 rounded-xl transition-all ${
-                input.trim() && !isLoading
+                isMounted && input.trim() && !isLoading
                   ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/20'
                   : 'bg-slate-800 text-slate-500 cursor-not-allowed'
               }`}
@@ -645,7 +678,7 @@ export default function ChatbotIncidentAgent() {
 
           <div className="flex items-center justify-between text-[11px] text-slate-500 px-2 font-mono">
             <span>Press Enter to send, Shift+Enter for new line</span>
-            <span>Grounded in {allIncidents.length} historical postmortems</span>
+            <span suppressHydrationWarning>Grounded in {isMounted ? allIncidents.length : 0} historical postmortems</span>
           </div>
         </div>
       </div>
@@ -725,11 +758,18 @@ export default function ChatbotIncidentAgent() {
             </div>
 
             <div className="p-5 overflow-y-auto flex-1 flex flex-col gap-3">
-              {allIncidents.map(inc => (
-                <div
-                  key={inc.id}
-                  className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 flex flex-col gap-2"
-                >
+              {allIncidents.length === 0 ? (
+                <div className="p-12 text-center text-xs text-slate-500">
+                  <Database className="w-8 h-8 text-slate-700 mx-auto mb-2" />
+                  <p className="font-semibold text-slate-400">Database Memory is Empty</p>
+                  <p className="mt-1 text-slate-500">No incidents are stored in memory. Submit or triage an incident to store it in persistent memory.</p>
+                </div>
+              ) : (
+                allIncidents.map(inc => (
+                  <div
+                    key={inc.id}
+                    className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 flex flex-col gap-2"
+                  >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
@@ -758,10 +798,17 @@ export default function ChatbotIncidentAgent() {
                     <span>MTTR: {inc.durationMinutes}m</span>
                   </div>
                 </div>
-              ))}
+              )))}
             </div>
 
-            <div className="p-3 border-t border-slate-800 flex justify-end">
+            <div className="p-3 border-t border-slate-800 flex items-center justify-between">
+              <button
+                onClick={handleClearDatabase}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 transition-colors flex items-center gap-1.5"
+                title="Wipe all incidents and feedback from database"
+              >
+                <span>Clear All Memory</span>
+              </button>
               <button
                 onClick={() => setShowArchive(false)}
                 className="px-4 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-white"
