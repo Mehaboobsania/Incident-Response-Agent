@@ -35,7 +35,7 @@ export function isLLMConfigured(): boolean {
 
 export function getLLMProvider(): string {
   if (process.env.GROQ_API_KEY) {
-    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'llama-3.3-70b-versatile';
+    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'openai/gpt-oss-120b';
     return `Groq (${model})`;
   }
   if (process.env.GEMINI_API_KEY) return 'Google Gemini';
@@ -65,7 +65,7 @@ export async function callLLM(options: {
 
   // 1. Groq API (First-class ultra-fast inference)
   if (groqKey) {
-    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'llama-3.3-70b-versatile';
+    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'openai/gpt-oss-120b';
     const url = 'https://api.groq.com/openai/v1/chat/completions';
 
     const messages = [];
