@@ -1,1 +1,203 @@
-[]
+[
+  {
+    "id": "INC-683",
+    "title": "production-service Incident",
+    "service": "production-service",
+    "severity": "P1",
+    "environment": "production",
+    "durationMinutes": 0,
+    "resolver": "oncall.engineer",
+    "createdAt": "2026-09-29T18:30:35.765Z",
+    "alertSignatures": [
+      "My database is facing bottlenecs how to resolve this issue at a large scale"
+    ],
+    "telemetry": {},
+    "rootCause": "Unknown. Likely causes for large-scale database bottlenecks include: 1) Missing or inefficient indexes on high-volume queries, 2) Connection pool exhaustion, 3) Lock contention/deadlocks, 4) Resource saturation (CPU/IO) on the DB instance, or 5) Application-level query storms. Specific telemetry is required to pinpoint the exact cause.",
+    "successfulMitigations": [
+      {
+        "id": "fix_1",
+        "action": "Identify and terminate long-running or blocking queries causing lock contention or resource saturation.",
+        "command": "psql -h <db-host> -U <user> -d <db-name> -c \"SELECT pid, now() - query_start AS duration, state, query FROM pg_stat_activity WHERE state != 'idle' AND now() - query_start > interval '5 seconds' ORDER BY duration DESC;\"",
+        "timesWorked": 1,
+        "timesAttempted": 1,
+        "avgResolutionMinutes": 5,
+        "successScore": 0.99,
+        "notes": "This is a diagnostic step. Identify the PID of the problematic query and terminate it if it is clearly stuck or causing a cascade of locks: SELECT pg_terminate_backend(<pid>);. Ensure you have authorization to terminate production queries."
+      },
+      {
+        "id": "fix_2",
+        "action": "Check for connection pool exhaustion by monitoring active connections against the maximum limit.",
+        "command": "psql -h <db-host> -U <user> -d <db-name> -c \"SELECT count(*) AS active_connections, max_connections FROM pg_stat_activity, pg_settings WHERE name = 'max_connections';\"",
+        "timesWorked": 1,
+        "timesAttempted": 1,
+        "avgResolutionMinutes": 2,
+        "successScore": 0.99,
+        "notes": "If active_connections is close to max_connections, the bottleneck is likely connection exhaustion. Mitigate by scaling out the application tier to distribute load or increasing the DB connection limit (with caution) and tuning the application's connection pool size."
+      },
+      {
+        "id": "fix_3",
+        "action": "Analyze slow query logs to identify inefficient queries lacking proper indexing.",
+        "command": "grep -i 'slow' /var/log/postgresql/postgresql-*.log | tail -n 50",
+        "timesWorked": 1,
+        "timesAttempted": 1,
+        "avgResolutionMinutes": 10,
+        "successScore": 0.99,
+        "notes": "Review the top slow queries. Use EXPLAIN ANALYZE on the most frequent slow queries to identify missing indexes. Create indexes on frequently filtered/sorted columns if appropriate."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "pitfall_1",
+        "action": "Do not restart the database instance without first capturing diagnostic information (slow logs, active queries, resource metrics).",
+        "command": "systemctl restart postgresql",
+        "dangerLevel": "CRITICAL",
+        "failureOutcome": "Restarting the DB will cause a full outage for all dependent services. It will also clear in-memory state and potentially lose the context of the bottleneck, making root cause analysis significantly harder. Only restart as a last resort after diagnostics are captured.",
+        "timesFailed": 0,
+        "timesAttempted": 0
+      },
+      {
+        "id": "pitfall_2",
+        "action": "Do not blindly increase max_connections without addressing the underlying application connection pool misconfiguration or query inefficiency.",
+        "command": "ALTER SYSTEM SET max_connections = 1000;",
+        "dangerLevel": "HIGH",
+        "failureOutcome": "Increasing max_connections consumes more memory per connection. If the root cause is an application leak or inefficient queries, this will only delay the inevitable crash and may worsen resource contention, leading to a more severe outage.",
+        "timesFailed": 0,
+        "timesAttempted": 0
+      }
+    ]
+  },
+  {
+    "id": "INC-190",
+    "title": "notification-service Incident",
+    "service": "notification-service",
+    "severity": "P1",
+    "environment": "production",
+    "durationMinutes": 0,
+    "resolver": "oncall.engineer",
+    "createdAt": "2026-09-29T18:26:53.210Z",
+    "alertSignatures": [
+      "notification-service: OutOfMemoryError (OOMKilled) crash loop, container memory 100% on email dispatch worker"
+    ],
+    "telemetry": {},
+    "rootCause": "Memory leak in email dispatch logic or unbounded caching of email templates/user data causing the Java heap to exceed container limits.",
+    "successfulMitigations": [
+      {
+        "id": "fix_1",
+        "action": "Enable JVM heap dump on OOM for post-mortem analysis",
+        "command": "kubectl set env deployment/notification-service -n production JAVA_OPTS=\"-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapdump.hprof\"",
+        "timesWorked": 0,
+        "timesAttempted": 0,
+        "avgResolutionMinutes": 5,
+        "successScore": 0.7,
+        "notes": "This is a critical diagnostic step. Ensure /tmp has sufficient disk space. The dump will be generated on the next OOM event, allowing offline analysis of the leak."
+      },
+      {
+        "id": "fix_2",
+        "action": "Increase container memory limit to provide temporary headroom and prevent immediate crash loop",
+        "command": "kubectl patch deployment notification-service -n production --type merge -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"email-dispatch-worker\",\"resources\":{\"limits\":{\"memory\":\"2Gi\"}}}]}}}}'",
+        "timesWorked": 1,
+        "timesAttempted": 1,
+        "avgResolutionMinutes": 10,
+        "successScore": 0.99,
+        "notes": "This is a mitigation, not a fix. It may delay the OOM but will not resolve the underlying memory leak. Monitor memory usage closely after applying."
+      },
+      {
+        "id": "fix_3",
+        "action": "Scale down the number of replicas to reduce concurrent memory pressure",
+        "command": "kubectl scale deployment notification-service -n production --replicas=1",
+        "timesWorked": 1,
+        "timesAttempted": 1,
+        "avgResolutionMinutes": 5,
+        "successScore": 0.99,
+        "notes": "This reduces the total memory footprint and may allow the service to stabilize if the OOM is caused by concurrent load. Monitor for increased latency or queue backlog."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "pitfall_1",
+        "action": "Do not restart the pod without first capturing a heap dump or logs",
+        "command": "kubectl delete pod <pod-name> -n production",
+        "dangerLevel": "HIGH",
+        "failureOutcome": "Losing the crash context will make it impossible to diagnose the root cause of the memory leak, leading to repeated incidents.",
+        "timesFailed": 0,
+        "timesAttempted": 0
+      },
+      {
+        "id": "pitfall_2",
+        "action": "Do not increase memory limits without investigating the code for memory leaks",
+        "command": "kubectl patch deployment notification-service -n production --type merge -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"email-dispatch-worker\",\"resources\":{\"limits\":{\"memory\":\"8Gi\"}}}]}}}}'",
+        "dangerLevel": "MEDIUM",
+        "failureOutcome": "Masking the issue by adding more memory will delay the inevitable OOM and waste cluster resources. The leak will continue to grow until it exhausts even the larger limit.",
+        "timesFailed": 0,
+        "timesAttempted": 0
+      }
+    ]
+  },
+  {
+    "id": "INC-232",
+    "title": "notification-service Incident",
+    "service": "notification-service",
+    "severity": "P1",
+    "environment": "production",
+    "durationMinutes": 0,
+    "resolver": "oncall.engineer",
+    "createdAt": "2026-09-29T18:22:24.384Z",
+    "alertSignatures": [
+      "notification-service: OutOfMemoryError (OOMKilled) crash loop, container memory 100% on email dispatch worker"
+    ],
+    "telemetry": {},
+    "rootCause": "Likely causes include a memory leak in the email dispatch logic, unbounded caching of email templates or user data, or processing a large batch of emails without proper pagination/streaming. The Java heap or native memory has exceeded the container's memory limit.",
+    "successfulMitigations": [
+      {
+        "id": "fix_1",
+        "action": "Increase container memory limit to provide temporary headroom and prevent immediate crash loop",
+        "command": "kubectl patch deployment notification-service -n production --type merge -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"email-dispatch-worker\",\"resources\":{\"limits\":{\"memory\":\"2Gi\"}}}]}}}}'",
+        "timesWorked": 0,
+        "timesAttempted": 0,
+        "avgResolutionMinutes": 5,
+        "successScore": 0.7,
+        "notes": "This is a mitigation, not a fix. It may delay the OOM but will not resolve the underlying memory leak. Monitor memory usage closely after applying."
+      },
+      {
+        "id": "fix_2",
+        "action": "Enable JVM heap dump on OOM for post-mortem analysis",
+        "command": "kubectl set env deployment/notification-service -n production JAVA_OPTS=\"-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapdump.hprof\"",
+        "timesWorked": 0,
+        "timesAttempted": 0,
+        "avgResolutionMinutes": 3,
+        "successScore": 0.7,
+        "notes": "Ensure the /tmp directory has sufficient disk space. The heap dump will be generated on the next OOM event, allowing for offline analysis of memory leaks."
+      },
+      {
+        "id": "fix_3",
+        "action": "Scale down the number of replicas to reduce concurrent memory pressure",
+        "command": "kubectl scale deployment notification-service -n production --replicas=1",
+        "timesWorked": 0,
+        "timesAttempted": 0,
+        "avgResolutionMinutes": 2,
+        "successScore": 0.7,
+        "notes": "This reduces the total memory footprint and may allow the service to stabilize if the OOM is caused by concurrent load. Monitor for increased latency or queue backlog."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "pitfall_1",
+        "action": "Do not restart the pod without first capturing a heap dump or logs",
+        "command": "kubectl delete pod <pod-name> -n production",
+        "dangerLevel": "HIGH",
+        "failureOutcome": "Losing the crash context will make it impossible to diagnose the root cause of the memory leak, leading to repeated incidents.",
+        "timesFailed": 0,
+        "timesAttempted": 0
+      },
+      {
+        "id": "pitfall_2",
+        "action": "Do not increase memory limits without investigating the code for memory leaks",
+        "command": "kubectl patch deployment notification-service -n production --type merge -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"email-dispatch-worker\",\"resources\":{\"limits\":{\"memory\":\"8Gi\"}}}]}}}}'",
+        "dangerLevel": "MEDIUM",
+        "failureOutcome": "Masking the issue by adding more memory will delay the inevitable OOM and waste cluster resources. The leak will continue to grow until it exhausts even the larger limit.",
+        "timesFailed": 0,
+        "timesAttempted": 0
+      }
+    ]
+  }
+]
