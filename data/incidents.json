@@ -1,0 +1,327 @@
+[
+  {
+    "id": "INC-402",
+    "title": "Postgres Connection Pool Exhaustion on Payments Service",
+    "service": "payments-service",
+    "environment": "production-us-east-1",
+    "severity": "P1",
+    "createdAt": "2026-06-14T03:22:10Z",
+    "resolvedAt": "2026-06-14T03:38:15Z",
+    "durationMinutes": 16,
+    "resolver": "alex.m (Senior SRE)",
+    "alertSignatures": [
+      "payments-service: Postgres connection timeout spike",
+      "p99 query latency > 8500ms on /api/v2/charge",
+      "active pg_connections 100/100 (pool saturated)",
+      "HTTP 504 Gateway Timeout error rate > 32%"
+    ],
+    "telemetry": {
+      "dbConnections": "100/100 (100% pool cap)",
+      "dbCpu": "14% (Idle waiting)",
+      "redisMemory": "42% (Normal)",
+      "appCpu": "22% (Normal)",
+      "queueDepth": "3,400 messages",
+      "errorPattern": "PrismaClientInitializationError: Timed out fetching a new connection from the pool"
+    },
+    "rootCause": "Prisma ORM connection leak inside Stripe webhook retry loop. Unhandled rejection during payment gateway network jitter left Prisma client transactions unclosed, holding idle connections until 30-minute keep-alive expiry.",
+    "slackContext": "#incidents-core: 'Why is DB CPU only 14% but connections are maxed? Check pg_stat_activity. Look at all those idle in transaction states from payments-service workers!'",
+    "successfulMitigations": [
+      {
+        "id": "act_drain_and_bump_pool",
+        "action": "Drain idle connections & temporarily scale pool ceiling",
+        "command": "kubectl exec -it deployment/payments-service -- node scripts/drain-idle-connections.js && kubectl set env deployment/payments-service PRISMA_POOL_MAX=45 DB_POOL_TIMEOUT=4000",
+        "timesWorked": 8,
+        "timesAttempted": 9,
+        "avgResolutionMinutes": 3.2,
+        "successScore": 0.94,
+        "notes": "Drains orphaned idle sockets without terminating in-flight checkout transactions. Restores checkout API within 90 seconds."
+      },
+      {
+        "id": "act_pg_terminate_idle",
+        "action": "Execute selective Postgres idle session termination",
+        "command": "psql $PAYMENTS_DB -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND state_change < current_timestamp - INTERVAL '2' MINUTE;\"",
+        "timesWorked": 6,
+        "timesAttempted": 7,
+        "avgResolutionMinutes": 4.1,
+        "successScore": 0.89,
+        "notes": "Direct SQL kill of zombie sessions on master node. High effectiveness if kubectl exec is slow."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "act_restart_deployment",
+        "action": "Restart pods via rollout restart",
+        "command": "kubectl rollout restart deployment/payments-service",
+        "timesFailed": 5,
+        "timesAttempted": 6,
+        "failureRate": 0.83,
+        "dangerLevel": "HIGH",
+        "failureOutcome": "CRITICAL REGRESSION: Rolling restart killed 8 pods simultaneously while 14,000 pending checkout retries were waiting. New pods started cold, flooded Postgres with 800 simultaneous SSL handshakes, and triggered total connection collapse extending downtime by 24 minutes."
+      },
+      {
+        "id": "act_scale_replica_count",
+        "action": "Scale pod replica count from 8 to 24",
+        "command": "kubectl scale deployment/payments-service --replicas=24",
+        "timesFailed": 4,
+        "timesAttempted": 4,
+        "failureRate": 1.0,
+        "dangerLevel": "CRITICAL",
+        "failureOutcome": "FAILED: Tripled the number of pods competing for the already saturated Postgres connection pool. All 24 pods entered CrashLoopBackOff due to pool starvation."
+      }
+    ],
+    "divergenceWarning": "Deceptive match risk: Alert looks like INC-882 (DB Timeouts due to Redis Cache Stampede), BUT here Postgres CPU is LOW (14%) and Redis is healthy. Do not flush Redis.",
+    "postmortemKeyTakeaways": "1. Never restart pods during pool saturation. 2. Implement strict client-side connection timeouts and active connection health checks."
+  },
+  {
+    "id": "INC-119",
+    "title": "Unindexed Query Table Scan During Flash Sale on Checkout API",
+    "service": "checkout-api",
+    "environment": "production-us-east-1",
+    "severity": "P1",
+    "createdAt": "2026-07-02T18:45:00Z",
+    "resolvedAt": "2026-07-02T19:04:12Z",
+    "durationMinutes": 19,
+    "resolver": "elena.k (Principal DB Architect)",
+    "alertSignatures": [
+      "checkout-api: Postgres CPU 99.8% (Database Saturation)",
+      "p99 query latency > 14000ms on SELECT * FROM orders WHERE user_id = $1 AND status = 'PENDING'",
+      "HTTP 504 on POST /checkout/submit",
+      "pg_stat_statements: seq_scans on orders > 120,000/min"
+    ],
+    "telemetry": {
+      "dbConnections": "68/100 (Safe)",
+      "dbCpu": "99.8% (Spike / Throttled)",
+      "redisMemory": "38% (Normal)",
+      "appCpu": "44% (Normal)",
+      "queueDepth": "1,120 orders",
+      "errorPattern": "canceling statement due to statement timeout (timeout=15000ms)"
+    },
+    "rootCause": "Migration dropped composite index 'idx_orders_user_status' prior to flash sale. High concurrent writes caused 120,000 full sequential scans across 48 million rows on the primary Postgres database instance.",
+    "slackContext": "#incidents-core: 'Postgres top query is seq scanning the entire orders table for user status! Someone run CREATE INDEX CONCURRENTLY immediately!'",
+    "successfulMitigations": [
+      {
+        "id": "act_create_concurrent_index",
+        "action": "Build partial index concurrently on active table",
+        "command": "psql $CHECKOUT_DB -c \"CREATE INDEX CONCURRENTLY idx_orders_user_pending ON orders(user_id) WHERE status = 'PENDING';\"",
+        "timesWorked": 4,
+        "timesAttempted": 4,
+        "avgResolutionMinutes": 4.5,
+        "successScore": 0.96,
+        "notes": "Creates partial index non-blocking in ~4 minutes. CPU dropped from 99.8% to 11% instantly."
+      },
+      {
+        "id": "act_enable_query_governor",
+        "action": "Throttle background reconciliation cron jobs",
+        "command": "kubectl scale cronjob/order-reconciler --replicas=0 && kubectl scale deployment/analytics-worker --replicas=0",
+        "timesWorked": 5,
+        "timesAttempted": 5,
+        "avgResolutionMinutes": 2.8,
+        "successScore": 0.92,
+        "notes": "Kills non-critical background jobs eating DB CPU, buying headroom for concurrent index creation."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "act_scale_rds_reader",
+        "action": "Scale Aurora read replicas",
+        "command": "aws rds create-db-instance-read-replica --db-instance-identifier checkout-reader-2",
+        "timesFailed": 3,
+        "timesAttempted": 3,
+        "failureRate": 1.0,
+        "dangerLevel": "MEDIUM",
+        "failureOutcome": "INEFFECTIVE & SLOW: Took 17 minutes to provision instance, but checkout transactions are atomic writes that run strictly on the write-master node. Reader provided 0% relief."
+      }
+    ],
+    "divergenceWarning": "Surface looks like INC-402 (slow checkout queries), but DB CPU is near 100% with high seq_scans, while connection pool is NOT exhausted.",
+    "postmortemKeyTakeaways": "Enforce automated linter check in CI/CD pipeline preventing removal of composite indexes on tables > 10M rows."
+  },
+  {
+    "id": "INC-882",
+    "title": "Redis Cache Eviction Storm & Cascading DB Avalanche on Catalog Search",
+    "service": "catalog-search",
+    "environment": "production-us-east-1",
+    "severity": "P1",
+    "createdAt": "2026-08-19T11:10:00Z",
+    "resolvedAt": "2026-08-19T11:28:40Z",
+    "durationMinutes": 18,
+    "resolver": "marcus.v (Staff Infrastructure Engineer)",
+    "alertSignatures": [
+      "catalog-search: Upstream DB query timeouts",
+      "HTTP 500 / 503 error rate > 48% on /search/items",
+      "Redis memory utilization 99.9% (evicted_keys > 45,000/sec)",
+      "Postgres latency spike (p99 > 11000ms)"
+    ],
+    "telemetry": {
+      "dbConnections": "95/100 (High due to miss storm)",
+      "dbCpu": "88% (High)",
+      "redisMemory": "99.9% (Exhausted, 31.9GB / 32GB)",
+      "appCpu": "72% (High)",
+      "queueDepth": "18,200 search RPCs",
+      "errorPattern": "OOM command not allowed when used memory > 'maxmemory' / upstream timeout"
+    },
+    "rootCause": "Unbounded cache key TTL bug in recent recommendation microservice release filled Redis cluster memory. Redis maxmemory policy triggered volatile-lru mass eviction of top 50,000 category caches. Search traffic fell through directly to Postgres in a classic cache stampede.",
+    "slackContext": "#incidents-core: 'Do NOT restart Postgres! The DB is dying because Redis is evicting everything and every request is a cache miss! Bump Redis maxmemory and enable stale-cache circuit breaker!'",
+    "successfulMitigations": [
+      {
+        "id": "act_expand_redis_and_stale_mode",
+        "action": "Expand Redis cluster memory & activate Stale-While-Revalidate fallback",
+        "command": "aws elasticache modify-cache-cluster --cache-cluster-id catalog-cache --cache-node-type cache.r6g.xlarge && kubectl exec deployment/catalog-search -- npm run activate-stale-cache-circuit-breaker",
+        "timesWorked": 7,
+        "timesAttempted": 8,
+        "avgResolutionMinutes": 3.8,
+        "successScore": 0.95,
+        "notes": "Stale-cache circuit breaker returns cached data even if expired for up to 2 hours, instantly relieving 94% of DB query pressure."
+      },
+      {
+        "id": "act_drop_recommendation_keys",
+        "action": "Prune bloated uncompressed recommendation keys",
+        "command": "kubectl exec deployment/catalog-search -- redis-cli --scan --pattern 'rec:*' | xargs -L 1000 redis-cli UNLINK",
+        "timesWorked": 5,
+        "timesAttempted": 6,
+        "avgResolutionMinutes": 4.2,
+        "successScore": 0.91,
+        "notes": "Uses UNLINK (async non-blocking deletion) instead of DEL to free 14GB without locking Redis event loop."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "act_redis_flushall",
+        "action": "Run FLUSHALL to clear cached keys",
+        "command": "redis-cli -h catalog-cache FLUSHALL",
+        "timesFailed": 3,
+        "timesAttempted": 3,
+        "failureRate": 1.0,
+        "dangerLevel": "FATAL",
+        "failureOutcome": "CATASTROPHIC REGRESSION: Cleared 100% of cached assets. Every single visitor request generated a cold SQL query, completely crashing the primary database and requiring a 45-minute cold reboot."
+      },
+      {
+        "id": "act_restart_db",
+        "action": "Restart database server to clear locks",
+        "command": "aws rds reboot-db-instance --db-instance-identifier catalog-db",
+        "timesFailed": 2,
+        "timesAttempted": 2,
+        "failureRate": 1.0,
+        "dangerLevel": "CRITICAL",
+        "failureOutcome": "FAILED: Database came up to thousands of pending search queries and instantly went back down. Root cause was the cache storm, not the database."
+      }
+    ],
+    "divergenceWarning": "DIVERGENCE ALERT: On the surface this looks like INC-402 (database timeout), but Redis eviction count is > 45,000/s and Redis memory is 99.9%. Treating this as a DB connection issue will fail.",
+    "postmortemKeyTakeaways": "Always enforce key TTLs at serialization level. Never allow FLUSHALL in production."
+  },
+  {
+    "id": "INC-654",
+    "title": "JWKS Key Rotation Desynchronization on Auth Gateway",
+    "service": "auth-gateway",
+    "environment": "production-us-east-1",
+    "severity": "P1",
+    "createdAt": "2026-09-05T08:12:00Z",
+    "resolvedAt": "2026-09-05T08:24:30Z",
+    "durationMinutes": 12,
+    "resolver": "samir.t (Lead Security Engineer)",
+    "alertSignatures": [
+      "auth-gateway: 401 Unauthorized spike (68% failure rate)",
+      "JWT signature verification failed: kid not found",
+      "p99 latency normal (<45ms), but user logins blocked",
+      "Customer support ticket surge: 'Session Expired'"
+    ],
+    "telemetry": {
+      "dbConnections": "12/100 (Low)",
+      "dbCpu": "8% (Low)",
+      "redisMemory": "25% (Low)",
+      "appCpu": "18% (Low)",
+      "queueDepth": "0 messages",
+      "errorPattern": "JsonWebTokenError: invalid key identifier (kid: 2026-09-auth-v3)"
+    },
+    "rootCause": "AWS Secrets Manager automated key rotation updated the signing key in the IAM cluster before the Envoy/Node.js auth gateway refreshed its local in-memory JWKS public key cache (TTL was set to 24 hours without proactive webhook invalidation).",
+    "slackContext": "#incidents-core: 'Logins are failing with 401 kid not found! The gateway has cached the old public key set. Force reload the JWKS endpoint!'",
+    "successfulMitigations": [
+      {
+        "id": "act_force_jwks_refresh",
+        "action": "Broadcast JWKS cache invalidation signal to gateway cluster",
+        "command": "curl -X POST http://auth-internal:8080/admin/jwks/invalidate-cache -H \"Authorization: Bearer $SYSTEM_ROOT_SECRET\"",
+        "timesWorked": 6,
+        "timesAttempted": 6,
+        "avgResolutionMinutes": 1.5,
+        "successScore": 0.98,
+        "notes": "Instantly forces all gateway pods to fetch newest public keyset. Success rate restored to 99.99% in under 90 seconds."
+      },
+      {
+        "id": "act_enable_dual_signature_mode",
+        "action": "Enable dual-signature verification mode (N and N-1 keys)",
+        "command": "kubectl set env deployment/auth-gateway ACCEPT_PREVIOUS_KEY=true && kubectl rollout status deployment/auth-gateway",
+        "timesWorked": 4,
+        "timesAttempted": 4,
+        "avgResolutionMinutes": 3.0,
+        "successScore": 0.94,
+        "notes": "Accepts tokens signed by either the old or new key for smooth transition."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "act_restart_auth_gateway_no_env",
+        "action": "Restart auth-gateway without flushing external CDN cache",
+        "command": "kubectl rollout restart deployment/auth-gateway",
+        "timesFailed": 3,
+        "timesAttempted": 4,
+        "failureRate": 0.75,
+        "dangerLevel": "MEDIUM",
+        "failureOutcome": "PARTIAL FAILURE: Fresh pods fetched from CloudFront CDN which still cached the 24-hour expired JWKS JSON response, continuing the outage."
+      }
+    ],
+    "divergenceWarning": "Divergence note: High 401 error rate without database latency or CPU load indicates cryptographic / auth key cache desynchronization, not database failure.",
+    "postmortemKeyTakeaways": "Configure CloudFront CDN cache-control headers on .well-known/jwks.json to max-age=60 with stale-while-revalidate."
+  },
+  {
+    "id": "INC-310",
+    "title": "Kafka Consumer Poison Pill & Partition Starvation on Billing Worker",
+    "service": "billing-worker",
+    "environment": "production-us-east-1",
+    "severity": "P2",
+    "createdAt": "2026-09-12T14:30:00Z",
+    "resolvedAt": "2026-09-12T14:48:20Z",
+    "durationMinutes": 18,
+    "resolver": "david.p (Staff Streaming Platform Eng)",
+    "alertSignatures": [
+      "billing-worker: Consumer group lag > 320,000 messages on topic payments.settled",
+      "p99 processing latency > 300s",
+      "billing-worker pod CPU 100% on partition 4 worker thread",
+      "Dead Letter Queue (DLQ) ingestion rate 0/sec (blocked)"
+    ],
+    "telemetry": {
+      "dbConnections": "24/100 (Safe)",
+      "dbCpu": "16% (Low)",
+      "redisMemory": "30% (Low)",
+      "appCpu": "98% on worker-pod-3",
+      "queueDepth": "320,000 lag",
+      "errorPattern": "SerializationException: Corrupted IEEE-754 decimal in payment payload at byte offset 412"
+    },
+    "rootCause": "A third-party POS client sent a corrupt floating-point decimal string in currency amount. The Jackson deserializer threw an unchecked runtime exception before the error handler, causing the consumer to restart offset commit in an infinite tight loop on partition 4.",
+    "slackContext": "#incidents-core: 'Partition 4 is completely stuck! The consumer is dying on the same corrupt offset over and over. Shift offset to DLQ!'",
+    "successfulMitigations": [
+      {
+        "id": "act_seek_and_dlq_offset",
+        "action": "Isolate poison offset, forward payload to DLQ, and seek consumer offset forward",
+        "command": "node scripts/kafka-skip-poison-pill.js --topic payments.settled --partition 4 --consumer-group billing-consumers --export-dlq true",
+        "timesWorked": 5,
+        "timesAttempted": 5,
+        "avgResolutionMinutes": 3.4,
+        "successScore": 0.96,
+        "notes": "Exports bad payload to S3 quarantine bucket and commits partition offset +1. Lag clears at 18,000 msgs/sec."
+      }
+    ],
+    "failedMitigations": [
+      {
+        "id": "act_scale_more_workers",
+        "action": "Scale billing-worker deployment from 8 to 24 replicas",
+        "command": "kubectl scale deployment/billing-worker --replicas=24",
+        "timesFailed": 4,
+        "timesAttempted": 4,
+        "failureRate": 1.0,
+        "dangerLevel": "LOW",
+        "failureOutcome": "COMPLETELY INEFFECTIVE: Kafka topic only had 8 partitions. All 16 newly spawned pods had no assigned partitions and sat idle, while Partition 4 remained deadlocked on the poison pill."
+      }
+    ],
+    "divergenceWarning": "Alert shows massive lag spike. Do NOT scale pods without checking Kafka partition count and per-partition lag distribution.",
+    "postmortemKeyTakeaways": "Wrap deserialization stage in strict schema try-catch with non-blocking Dead Letter Producer."
+  }
+]
