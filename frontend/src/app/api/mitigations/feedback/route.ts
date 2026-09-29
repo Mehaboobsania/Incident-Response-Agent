@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { recordFeedbackInDb } from '@/lib/db';
 import { getHindsightEngine } from '@/lib/hindsight';
 
 export async function POST(req: Request) {
@@ -10,8 +11,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'incidentId and outcome are required' }, { status: 400 });
     }
 
+    // Persist directly into the SQLite database!
+    recordFeedbackInDb(incidentId, actionId, outcome, notes, engineer);
+
+    // Also update engine in-memory cache if active
     const engine = getHindsightEngine();
-    const result = engine.recordOutcome(incidentId, actionId, outcome, {
+    engine.recordOutcome(incidentId, actionId, outcome, {
       notes,
       engineer,
       actionTitle,
@@ -19,7 +24,13 @@ export async function POST(req: Request) {
       durationMinutes
     });
 
-    return NextResponse.json(result);
+    return NextResponse.json({
+      success: true,
+      incidentId,
+      actionId,
+      outcome,
+      persistedInDatabase: true
+    });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

@@ -1,22 +1,41 @@
 import { NextResponse } from 'next/server';
-import { getHindsightEngine } from '@/lib/hindsight';
+import { getAllIncidentsFromDb, saveIncidentToDb } from '@/lib/db';
+import { Incident } from '@/lib/types';
 
 export async function GET() {
-  const engine = getHindsightEngine();
-  engine.loadData();
+  const incidents = getAllIncidentsFromDb();
   return NextResponse.json({
-    total: engine.incidents.length,
-    incidents: engine.incidents
+    total: incidents.length,
+    incidents
   });
 }
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const engine = getHindsightEngine();
-    const newInc = engine.registerIncident(body);
+    const newId = body.id || `INC-${Math.floor(100 + Math.random() * 900)}`;
+
+    const newInc: Incident = {
+      id: newId,
+      title: body.title || 'Untitled Incident',
+      service: body.service || 'unknown-service',
+      severity: body.severity || 'P1',
+      environment: body.environment || 'production',
+      rootCause: body.rootCause || '',
+      telemetry: body.telemetry || {},
+      alertSignatures: body.alertSignatures || [body.title || 'alert'],
+      resolver: body.resolver || 'oncall.engineer',
+      durationMinutes: body.durationMinutes || 15,
+      createdAt: body.createdAt || new Date().toISOString(),
+      successfulMitigations: body.successfulMitigations || [],
+      failedMitigations: body.failedMitigations || []
+    };
+
+    // Save directly into SQLite database
+    saveIncidentToDb(newInc);
+
     return NextResponse.json({
-      message: 'Incident recorded into Hindsight memory',
+      message: 'Incident persisted into Database',
       incident: newInc
     }, { status: 201 });
   } catch (err: any) {

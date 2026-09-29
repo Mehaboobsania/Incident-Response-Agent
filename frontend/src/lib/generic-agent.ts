@@ -3,76 +3,66 @@ import { GenericAgentResult, GenericAgentPlanStep } from './types';
 export class GenericAgent {
   public name = "Generic OpsBot (Zero-Memory Baseline)";
 
-  public analyze(alert: string | { title?: string; message?: string }): GenericAgentResult {
-    const text = (typeof alert === "string" ? alert : (alert.title || alert.message || "")).toLowerCase();
+  public analyze(alert: string | { title?: string; message?: string; service?: string }): GenericAgentResult {
+    const rawText = typeof alert === 'string' ? alert : [alert.title, alert.message, alert.service].filter(Boolean).join(' ');
+    const text = rawText.toLowerCase();
 
-    const genericSteps: GenericAgentPlanStep[] = [
+    // Extract dynamic service identifier if present
+    const serviceMatch = text.match(/([a-z0-9_-]+(?:service|api|worker|gateway|app))/i);
+    const targetService = (typeof alert === 'object' && alert.service) ? alert.service : (serviceMatch ? serviceMatch[1] : 'application');
+
+    const steps: GenericAgentPlanStep[] = [
       {
         order: 1,
-        step: "Inspect Pod / Container Logs",
-        command: "kubectl logs -l app=service --tail=200 --timestamps",
-        rationale: "Check standard output and standard error for recent stack traces or unhandled exceptions."
+        step: `Inspect Pod & Container Logs for ${targetService}`,
+        command: `kubectl logs -l app=${targetService} --tail=200 --timestamps`,
+        rationale: "Generic initial step: check stdout and stderr for unhandled exceptions or error codes."
       },
       {
         order: 2,
-        step: "Check Network Connectivity & Ping Database",
-        command: "nc -zv database.internal.net 5432 && ping -c 4 auth-gateway",
-        rationale: "Confirm DNS resolution and TCP socket reachability to upstream and downstream services."
+        step: `Check Network Reachability & Upstream Dependencies`,
+        command: `curl -ivs https://${targetService}.internal/healthz || ping -c 3 ${targetService}`,
+        rationale: "Generic connectivity check to verify whether pods are actively listening on network sockets."
       },
       {
         order: 3,
-        step: "Perform Rolling Restart of Pods",
-        command: "kubectl rollout restart deployment/service",
-        rationale: "Clears potential memory leaks, stuck goroutines, or frozen thread pools by resetting containers.",
+        step: `Perform Rolling Restart of Pods`,
+        command: `kubectl rollout restart deployment/${targetService}`,
+        rationale: "Generic recovery attempt: restart containers to release memory leaks, stuck goroutines, or hung connections.",
         isDangerous: true,
-        risk: "Generic recommendation. In connection pool or cache storm scenarios, restarts cause catastrophic thundering herds."
+        risk: "Dangerous without incident memory. In cache stampede or connection pool saturation, restarts trigger massive cold start thundering herds that collapse upstream databases."
       },
       {
         order: 4,
-        step: "Scale Pod Replicas Horizontally",
-        command: "kubectl scale deployment/service --replicas=16",
-        rationale: "Distributes incoming traffic across more compute instances if CPU/memory utilization is elevated.",
+        step: `Scale Replicas Horizontally`,
+        command: `kubectl scale deployment/${targetService} --replicas=8`,
+        rationale: "Generic scaling attempt: distribute load across more pods.",
         isDangerous: true,
-        risk: "If bottleneck is downstream DB connections or fixed partition count, scaling pods worsens contention."
-      },
-      {
-        order: 5,
-        step: "Escalate to Database Administrator or Service Owner",
-        command: "pagerduty trigger --service 'DBA-OnCall' --note 'Timeouts detected'",
-        rationale: "When standard triage steps fail, escalate to senior engineering staff."
+        risk: "If the failure is caused by backend database connection saturation or locked partitions, increasing pods multiplies connection pressure."
       }
     ];
 
-    let contextualGuess = "Generic Service Outage";
-    if (text.includes("timeout") || text.includes("database") || text.includes("postgres")) {
-      contextualGuess = "Database Communication Degradation";
-    } else if (text.includes("401") || text.includes("auth") || text.includes("token")) {
-      contextualGuess = "Authentication / Gateway Issue";
-    } else if (text.includes("lag") || text.includes("kafka") || text.includes("queue")) {
-      contextualGuess = "Message Queue Consumer Delay";
-    }
-
     return {
       agentType: "zero_memory",
-      confidence: "Low (No historical organizational context)",
-      identifiedCategory: contextualGuess,
+      confidence: "Low (Zero historical organizational memory)",
+      identifiedCategory: `Unindexed ${targetService} Incident`,
       estimatedMttrMinutes: 45,
-      systemSpecificKnowledge: "None. Using standard generalist SRE playbook.",
-      summary: "Without incident history, this system suggests standard diagnostic commands (log inspection, connectivity tests) and blunt mitigation tactics (pod restart, horizontal scaling).",
-      mitigationPlan: genericSteps,
+      systemSpecificKnowledge: "None. Blind guessing using standard textbook runbooks.",
+      summary: `Standard generalist AI with zero memory. It blindly suggests container restarts and scaling without knowing whether restarts caused outages previously.`,
+      mitigationPlan: steps,
       warnings: [
         "⚠️ No past postmortems indexed. High probability of repeating past mistakes.",
-        "⚠️ Recommending pod restart without checking connection pool state risks cascading failover.",
-        "⚠️ Average MTTR without memory is 45-60 minutes."
+        "⚠️ Recommending pod restarts blindly risks triggering cascading system collapse.",
+        "⚠️ Estimated MTTR without memory is 45-60 minutes of trial-and-error."
       ]
     };
   }
 }
 
-let globalGenericAgent: GenericAgent | null = null;
+let genericAgentInstance: GenericAgent | null = null;
 export function getGenericAgent(): GenericAgent {
-  if (!globalGenericAgent) {
-    globalGenericAgent = new GenericAgent();
+  if (!genericAgentInstance) {
+    genericAgentInstance = new GenericAgent();
   }
-  return globalGenericAgent;
+  return genericAgentInstance;
 }
