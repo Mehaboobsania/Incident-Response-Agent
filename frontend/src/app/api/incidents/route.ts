@@ -42,3 +42,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+
+export async function DELETE() {
+  try {
+    const { clearAllIncidentsFromDb } = await import('@/lib/db');
+    clearAllIncidentsFromDb();
+    return NextResponse.json({
+      success: true,
+      message: 'All incidents and feedback records successfully deleted from database memory.',
+      total: 0
+    });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}

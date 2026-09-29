@@ -29,10 +29,27 @@ export async function POST(req: Request) {
       const statusNote = isLLMConfigured()
         ? `Connected to **${provider}**.`
         : '⚠️ No LLM API key configured in `.env.local` yet.';
-
       return NextResponse.json({
         type: 'greeting',
         text: `Hello! I am your **Incident Response Agent** backed by persistent database memory. ${statusNote}\n\nPaste an active alert, stack trace, or describe an outage to get database-grounded diagnostics and verified mitigations.`,
+        searchResult: null
+      });
+    }
+
+    // 1.5 Memory wipe / reset commands
+    if (
+      lower.includes('clear memory') ||
+      lower.includes('wipe memory') ||
+      lower.includes('reset memory') ||
+      lower.includes('clear database') ||
+      lower.includes('empty database') ||
+      lower.includes('remove everything')
+    ) {
+      const { clearAllIncidentsFromDb } = await import('@/lib/db');
+      clearAllIncidentsFromDb();
+      return NextResponse.json({
+        type: 'learned',
+        text: '🧹 **Memory & Database Cleared!**\n\nAll historical postmortems, mitigations, anti-patterns, and feedback records have been completely wiped from database storage. The agent is now running with a completely clean slate (0 incidents in memory).',
         searchResult: null
       });
     }

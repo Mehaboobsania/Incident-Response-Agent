@@ -94,6 +94,18 @@ export default function ChatbotIncidentAgent() {
     }
   };
 
+  const handleClearDatabase = async () => {
+    if (!window.confirm('Are you sure you want to completely wipe all incidents from database memory?')) return;
+    try {
+      await fetch('/api/incidents', { method: 'DELETE' });
+      setAllIncidents([]);
+      setMessages([]);
+      setShowArchive(false);
+    } catch (e) {
+      console.error('Failed to clear memory', e);
+    }
+  };
+
   const handleSend = async (textToSend?: string) => {
     const query = (textToSend || input).trim();
     if (!query || isLoading) return;
@@ -765,7 +777,14 @@ export default function ChatbotIncidentAgent() {
               ))}
             </div>
 
-            <div className="p-3 border-t border-slate-800 flex justify-end">
+            <div className="p-3 border-t border-slate-800 flex items-center justify-between">
+              <button
+                onClick={handleClearDatabase}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 transition-colors flex items-center gap-1.5"
+                title="Wipe all incidents and feedback from database"
+              >
+                <span>Clear All Memory</span>
+              </button>
               <button
                 onClick={() => setShowArchive(false)}
                 className="px-4 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-white"

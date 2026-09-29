@@ -215,56 +215,54 @@ export function getAllIncidentsFromDb(): Incident[] {
   if (db && !db.isFallback) {
     try {
       const incRows: any[] = db.prepare('SELECT * FROM incidents ORDER BY created_at DESC').all();
-      if (incRows.length > 0) {
-        return incRows.map(row => {
-          const mitigations: any[] = db.prepare('SELECT * FROM mitigations WHERE incident_id = ?').all(row.id);
-          const antiPatterns: any[] = db.prepare('SELECT * FROM anti_patterns WHERE incident_id = ?').all(row.id);
+      return incRows.map(row => {
+        const mitigations: any[] = db.prepare('SELECT * FROM mitigations WHERE incident_id = ?').all(row.id);
+        const antiPatterns: any[] = db.prepare('SELECT * FROM anti_patterns WHERE incident_id = ?').all(row.id);
 
-          return {
-            id: row.id,
-            title: row.title,
-            service: row.service,
-            severity: row.severity,
-            environment: row.environment,
-            rootCause: row.root_cause,
-            telemetry: JSON.parse(row.telemetry || '{}'),
-            alertSignatures: JSON.parse(row.alert_signatures || '[]'),
-            resolver: row.resolver,
-            durationMinutes: row.duration_minutes,
-            createdAt: row.created_at,
-            resolvedAt: row.resolved_at,
-            successfulMitigations: mitigations.map(m => ({
-              id: m.id,
-              action: m.action,
-              command: m.command,
-              timesWorked: m.times_worked,
-              timesAttempted: m.times_attempted,
-              avgResolutionMinutes: m.avg_resolution_minutes,
-              successScore: m.success_score,
-              notes: m.notes,
-              sourceIncidentId: row.id,
-              sourceIncidentTitle: row.title
-            })),
-            failedMitigations: antiPatterns.map(f => ({
-              id: f.id,
-              action: f.action,
-              command: f.command,
-              timesFailed: f.times_failed,
-              timesAttempted: f.times_attempted,
-              dangerLevel: f.danger_level,
-              failureOutcome: f.failure_outcome,
-              sourceIncidentId: row.id,
-              sourceIncidentTitle: row.title
-            }))
-          };
-        });
-      }
+        return {
+          id: row.id,
+          title: row.title,
+          service: row.service,
+          severity: row.severity,
+          environment: row.environment,
+          rootCause: row.root_cause,
+          telemetry: JSON.parse(row.telemetry || '{}'),
+          alertSignatures: JSON.parse(row.alert_signatures || '[]'),
+          resolver: row.resolver,
+          durationMinutes: row.duration_minutes,
+          createdAt: row.created_at,
+          resolvedAt: row.resolved_at,
+          successfulMitigations: mitigations.map(m => ({
+            id: m.id,
+            action: m.action,
+            command: m.command,
+            timesWorked: m.times_worked,
+            timesAttempted: m.times_attempted,
+            avgResolutionMinutes: m.avg_resolution_minutes,
+            successScore: m.success_score,
+            notes: m.notes,
+            sourceIncidentId: row.id,
+            sourceIncidentTitle: row.title
+          })),
+          failedMitigations: antiPatterns.map(f => ({
+            id: f.id,
+            action: f.action,
+            command: f.command,
+            timesFailed: f.times_failed,
+            timesAttempted: f.times_attempted,
+            dangerLevel: f.danger_level,
+            failureOutcome: f.failure_outcome,
+            sourceIncidentId: row.id,
+            sourceIncidentTitle: row.title
+          }))
+        };
+      });
     } catch (e) {
       console.error('Error reading from SQLite:', e);
     }
   }
 
-  // Fallback to disk JSON
+  // Fallback to disk JSON only if SQLite was unavailable
   const jsonPath = getJsonFallbackPath();
   if (fs.existsSync(jsonPath)) {
     try {
@@ -274,6 +272,43 @@ export function getAllIncidentsFromDb(): Incident[] {
     }
   }
   return [];
+}
+
+export function clearAllIncidentsFromDb(): void {
+  const db = getDatabase();
+
+  if (db && !db.isFallback) {
+    try {
+      db.exec(`
+        DELETE FROM mitigations;
+        DELETE FROM anti_patterns;
+        DELETE FROM feedback_logs;
+        DELETE FROM incidents;
+      `);
+    } catch (e) {
+      console.error('Error clearing SQLite tables:', e);
+    }
+  }
+
+  // Clear JSON storage files
+  const rootDataDir = path.resolve(process.cwd(), '..', 'data');
+  const rootJson = path.join(rootDataDir, 'incidents.json');
+  if (fs.existsSync(rootJson)) {
+    try {
+      fs.writeFileSync(rootJson, '[]', 'utf8');
+    } catch (e) {
+      console.error('Error clearing root incidents.json:', e);
+    }
+  }
+
+  const localJson = path.resolve(process.cwd(), 'src', 'lib', 'data', 'incidents.json');
+  if (fs.existsSync(localJson)) {
+    try {
+      fs.writeFileSync(localJson, '[]', 'utf8');
+    } catch (e) {
+      console.error('Error clearing local incidents.json:', e);
+    }
+  }
 }
 
 export function recordFeedbackInDb(
