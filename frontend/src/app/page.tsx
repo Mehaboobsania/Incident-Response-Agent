@@ -19,7 +19,8 @@ import {
   Terminal,
   Activity,
   Layers,
-  Download
+  Download,
+  Lightbulb
 } from 'lucide-react';
 import {
   Incident,
@@ -155,9 +156,13 @@ export default function ChatbotIncidentAgent() {
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
       } else {
+        if (data.searchResult?.isZeroDay) {
+          fetchIncidents();
+        }
         assistantMessage = {
           id: `asst_${Date.now()}`,
           role: 'assistant',
+          content: data.text,
           searchResult: data.searchResult,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
@@ -433,12 +438,20 @@ export default function ChatbotIncidentAgent() {
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono font-bold text-emerald-400">
-                          {msg.searchResult.primaryConfidence}% Match
-                        </span>
+                        {msg.searchResult.isZeroDay ? (
+                          <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                            <Sparkles className="w-3 h-3" />
+                            NEW INCIDENT • AI HYPOTHESIS
+                          </span>
+                        ) : (
+                          <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            HISTORICAL PRECEDENT MATCHED • {msg.searchResult.primaryConfidence || 100}% Experience
+                          </span>
+                        )}
                         <button
                           onClick={() => openPostmortem(msg.searchResult!.primaryIncident!.id)}
-                          className="text-[11px] font-medium text-sky-400 hover:text-sky-300 underline flex items-center gap-1"
+                          className="text-[11px] font-medium text-sky-400 hover:text-sky-300 underline flex items-center gap-1 ml-1"
                         >
                           <FileText className="w-3 h-3" />
                           <span>Postmortem</span>
@@ -450,9 +463,9 @@ export default function ChatbotIncidentAgent() {
                       {msg.searchResult.primaryIncident.title}
                     </h2>
 
-                    <div className="bg-slate-950/60 border-l-2 border-indigo-400 p-2.5 rounded-r text-xs text-slate-300 leading-relaxed">
-                      <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block mb-0.5">
-                        Historical Root Cause
+                    <div className={`bg-slate-950/60 border-l-2 ${msg.searchResult.isZeroDay ? 'border-amber-400' : 'border-indigo-400'} p-2.5 rounded-r text-xs text-slate-300 leading-relaxed`}>
+                      <span className={`text-[10px] font-bold ${msg.searchResult.isZeroDay ? 'text-amber-400' : 'text-indigo-400'} uppercase tracking-wider block mb-0.5`}>
+                        {msg.searchResult.isZeroDay ? 'AI Diagnostic Hypothesis (Zero-Day)' : 'Historical Root Cause (Verified in Memory)'}
                       </span>
                       {msg.searchResult.primaryIncident.rootCause}
                     </div>
@@ -480,13 +493,13 @@ export default function ChatbotIncidentAgent() {
 
                 {/* Verified Mitigations with Feedback Buttons */}
                 <div className="flex flex-col gap-2.5">
-                  <div className="flex items-center justify-between text-xs font-semibold text-emerald-400">
+                  <div className={`flex items-center justify-between text-xs font-semibold ${msg.searchResult.isZeroDay ? 'text-amber-400' : 'text-emerald-400'}`}>
                     <span className="flex items-center gap-1.5">
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>Verified Fixes (Empirically Ranked)</span>
+                      {msg.searchResult.isZeroDay ? <Lightbulb className="w-4 h-4 text-amber-400" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
+                      <span>{msg.searchResult.isZeroDay ? 'Proposed Solutions to Try (Click "Worked" on what solves it)' : 'Verified Fixes (Empirically Proven in Memory)'}</span>
                     </span>
                     <span className="text-[10px] text-slate-400 font-mono font-normal">
-                      Click feedback to update agent memory
+                      {msg.searchResult.isZeroDay ? 'Click feedback or reply in chat' : 'Grounded in past resolved outages'}
                     </span>
                   </div>
 
@@ -503,9 +516,15 @@ export default function ChatbotIncidentAgent() {
                       >
                         <div className="flex items-center justify-between text-xs">
                           <span className="font-bold text-white">#{idx + 1} {fix.action}</span>
-                          <span className="font-mono text-[11px] text-emerald-400">
-                            {successPct}% success ({fix.avgResolutionMinutes}m MTTR)
-                          </span>
+                          {msg.searchResult?.isZeroDay || (fix.timesWorked || 0) === 0 ? (
+                            <span className="font-mono text-[11px] text-amber-400">
+                              Trial / Proposed
+                            </span>
+                          ) : (
+                            <span className="font-mono text-[11px] text-emerald-400">
+                              {successPct}% success ({fix.timesWorked || 1} prior {fix.timesWorked === 1 ? 'fix' : 'fixes'})
+                            </span>
+                          )}
                         </div>
 
                         {/* Command Code Box */}
