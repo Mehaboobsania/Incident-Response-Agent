@@ -26,21 +26,25 @@ export interface LLMAnalysisResult {
 }
 
 export function isLLMConfigured(): boolean {
-  return !!(process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY);
+  return !!(
+    process.env.GROQ_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.OPENAI_API_KEY
+  );
 }
 
 export function getLLMProvider(): string {
-  if (process.env.GEMINI_API_KEY) return 'Google Gemini';
-  if (process.env.OPENAI_API_KEY) {
-    if (process.env.OPENAI_BASE_URL?.includes('groq')) return 'Groq (OpenAI-Compatible)';
-    if (process.env.OPENAI_BASE_URL?.includes('openrouter')) return 'OpenRouter';
-    return 'OpenAI';
+  if (process.env.GROQ_API_KEY) {
+    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'llama-3.3-70b-versatile';
+    return `Groq (${model})`;
   }
+  if (process.env.GEMINI_API_KEY) return 'Google Gemini';
+  if (process.env.OPENAI_API_KEY) return 'OpenAI';
   return 'None';
 }
 
 /**
- * Invokes the configured LLM (Gemini or OpenAI/compatible) with zero external package dependencies.
+ * Invokes the configured LLM (Groq, Gemini, or OpenAI) with zero external package dependencies.
  */
 export async function callLLM(options: {
   systemPrompt?: string;
@@ -49,16 +53,60 @@ export async function callLLM(options: {
 }): Promise<string> {
   const { systemPrompt, userPrompt, jsonMode = false } = options;
 
+  const groqKey = process.env.GROQ_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
-  if (!geminiKey && !openaiKey) {
+  if (!groqKey && !geminiKey && !openaiKey) {
     throw new Error(
-      'No LLM API key configured. Please add GEMINI_API_KEY or OPENAI_API_KEY in frontend/.env.local'
+      'No LLM API key configured. Please add GROQ_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY in frontend/.env.local'
     );
   }
 
-  // 1. Google Gemini API
+  // 1. Groq API (First-class ultra-fast inference)
+  if (groqKey) {
+    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'llama-3.3-70b-versatile';
+    const url = 'https://api.groq.com/openai/v1/chat/completions';
+
+    const messages = [];
+    if (systemPrompt) {
+      messages.push({ role: 'system', content: systemPrompt });
+    }
+    messages.push({ role: 'user', content: userPrompt });
+
+    const body: any = {
+      model,
+      messages,
+      temperature: 0.1
+    };
+
+    if (jsonMode) {
+      body.response_format = { type: 'json_object' };
+    }
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${groqKey}`
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Groq API error (${res.status}): ${errText}`);
+    }
+
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error('Groq API returned an empty response.');
+    }
+    return content;
+  }
+
+  // 2. Google Gemini API
   if (geminiKey) {
     const model = process.env.GEMINI_MODEL || process.env.LLM_MODEL || 'gemini-1.5-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`;
@@ -111,7 +159,7 @@ export async function callLLM(options: {
     return candidate;
   }
 
-  // 2. OpenAI / OpenAI-Compatible (Groq, OpenRouter, Ollama, DeepSeek)
+  // 3. OpenAI / OpenAI-Compatible (Ollama, OpenRouter, DeepSeek)
   if (openaiKey) {
     const baseURL = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
     const model = process.env.OPENAI_MODEL || process.env.LLM_MODEL || 'gpt-4o-mini';
@@ -177,7 +225,6 @@ RULES:
 6. Flag dangerous pitfalls / anti-patterns (actions that engineers must avoid because they fail or worsen downtime).
 7. Respond ONLY with valid JSON conforming to the requested schema.`;
 
-  // Provide simplified view of memory
   const memoryContext = historicalIncidents.map(inc => ({
     id: inc.id,
     title: inc.title,
@@ -244,7 +291,6 @@ Provide your analysis in JSON format with exactly this structure:
   });
 
   try {
-    // Clean potential markdown fencing from LLM
     const cleaned = rawJson.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
     return JSON.parse(cleaned);
   } catch (e) {
