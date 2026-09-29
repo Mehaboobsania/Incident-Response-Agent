@@ -124,7 +124,10 @@ export default function ChatbotIncidentAgent() {
           content: data.text,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
-      } else if (data.type === 'no_match') {
+      } else if (data.type === 'no_match' || data.type === 'learned') {
+        if (data.type === 'learned') {
+          fetchIncidents();
+        }
         assistantMessage = {
           id: `asst_${Date.now()}`,
           role: 'assistant',
