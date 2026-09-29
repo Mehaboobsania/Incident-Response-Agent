@@ -25,15 +25,24 @@ export class HindsightEngine {
 
   public loadData(): void {
     try {
+      const { getAllIncidentsFromDb } = require('./db');
+      const fromDb = getAllIncidentsFromDb();
+      if (Array.isArray(fromDb) && fromDb.length > 0) {
+        this.incidents = fromDb;
+        return;
+      }
+    } catch (dbErr) {
+      // fallback
+    }
+
+    try {
       if (fs.existsSync(this.dataPath)) {
         const raw = fs.readFileSync(this.dataPath, 'utf8');
         this.incidents = JSON.parse(raw);
       } else {
-        // Fallback relative to current dir
-        const altPath = path.join(__dirname, 'data', 'incidents.json');
-        if (fs.existsSync(altPath)) {
-          const raw = fs.readFileSync(altPath, 'utf8');
-          this.incidents = JSON.parse(raw);
+        const rootPath = path.resolve(process.cwd(), '..', 'data', 'incidents.json');
+        if (fs.existsSync(rootPath)) {
+          this.incidents = JSON.parse(fs.readFileSync(rootPath, 'utf8'));
         } else {
           this.incidents = [];
         }
@@ -96,6 +105,7 @@ export class HindsightEngine {
   }
 
   public search(queryAlert: string | { title?: string; service?: string; message?: string; errorPattern?: string; alertSignature?: string; telemetry?: IncidentTelemetry }): SearchResult {
+    this.loadData();
     let alertText = '';
     let incomingService = '';
     let incomingTelemetry: IncidentTelemetry = {};
@@ -205,27 +215,26 @@ export class HindsightEngine {
 
     const flags: Array<{ metric: string; expected: string; current: string; detail: string }> = [];
 
-    if (incident.id === 'INC-402') {
-      const incomingCpu = incomingTelemetry.dbCpu ? parseFloat(incomingTelemetry.dbCpu) : null;
-      if (incomingCpu !== null && incomingCpu > 70) {
-        flags.push({
-          metric: "Database CPU",
-          expected: "14% (Idle during pool leak)",
-          current: `${incomingCpu}% (High saturation)`,
-          detail: "Incoming alert shows high DB CPU. INC-402 is an idle connection leak. This looks closer to an unindexed query (INC-119) or cache stampede (INC-882)."
-        });
-      }
-    }
+    // Dynamic telemetry comparison based strictly on database records
+    if (incident.telemetry && incomingTelemetry) {
+      for (const [metricKey, historicalVal] of Object.entries(incident.telemetry)) {
+        if (!historicalVal) continue;
+        const incomingVal = incomingTelemetry[metricKey];
+        if (!incomingVal) continue;
 
-    if (incomingTelemetry.redisMemory) {
-      const redisVal = parseFloat(incomingTelemetry.redisMemory);
-      if (redisVal > 90 && incident.id !== 'INC-882') {
-        flags.push({
-          metric: "Redis Memory Utilization",
-          expected: "< 50%",
-          current: `${redisVal}% (Critically Exhausted)`,
-          detail: "Redis memory is saturated (>90%). Surface timeouts are likely caused by cache stampede (INC-882), not primary database or service code."
-        });
+        const numHist = parseFloat(historicalVal);
+        const numInc = parseFloat(incomingVal);
+        if (!isNaN(numHist) && !isNaN(numInc)) {
+          // Detect divergence if numerical metrics conflict significantly (>= 30% difference)
+          if (Math.abs(numHist - numInc) >= 30) {
+            flags.push({
+              metric: metricKey,
+              expected: `${historicalVal} (Historical incident baseline)`,
+              current: `${incomingVal} (Real-time telemetry conflicting)`,
+              detail: `Incoming alert reports ${metricKey} = ${incomingVal}, whereas historical precedent ${incident.id} recorded ${metricKey} = ${historicalVal}.`
+            });
+          }
+        }
       }
     }
 

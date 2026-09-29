@@ -215,30 +215,25 @@ class HindsightEngine {
 
     const flags = [];
 
-    // Check DB CPU divergence: e.g. INC-402 expects idle DB CPU (~14%), if incoming is >80%, it diverges!
-    if (incident.id === 'INC-402') {
-      const incCpuNum = 14;
-      const incomingCpu = incomingTelemetry.dbCpu ? parseFloat(incomingTelemetry.dbCpu) : null;
-      if (incomingCpu !== null && incomingCpu > 70) {
-        flags.push({
-          metric: "Database CPU",
-          expected: "14% (Idle during pool leak)",
-          current: `${incomingCpu}% (High saturation)`,
-          detail: "Incoming alert shows high DB CPU. INC-402 is an idle connection leak. This looks closer to an unindexed query (INC-119) or cache stampede (INC-882)."
-        });
-      }
-    }
+    // Dynamic telemetry comparison based strictly on database records
+    if (incident.telemetry && incomingTelemetry) {
+      for (const [metricKey, historicalVal] of Object.entries(incident.telemetry)) {
+        if (!historicalVal) continue;
+        const incomingVal = incomingTelemetry[metricKey];
+        if (!incomingVal) continue;
 
-    // Check Redis Memory divergence
-    if (incomingTelemetry.redisMemory) {
-      const redisVal = parseFloat(incomingTelemetry.redisMemory);
-      if (redisVal > 90 && incident.id !== 'INC-882') {
-        flags.push({
-          metric: "Redis Memory Utilization",
-          expected: "< 50%",
-          current: `${redisVal}% (Critically Exhausted)`,
-          detail: "Redis memory is saturated (>90%). Surface timeouts are likely caused by cache stampede (INC-882), not primary database or service code."
-        });
+        const numHist = parseFloat(historicalVal);
+        const numInc = parseFloat(incomingVal);
+        if (!isNaN(numHist) && !isNaN(numInc)) {
+          if (Math.abs(numHist - numInc) >= 30) {
+            flags.push({
+              metric: metricKey,
+              expected: `${historicalVal} (Historical incident baseline)`,
+              current: `${incomingVal} (Real-time telemetry conflicting)`,
+              detail: `Incoming alert reports ${metricKey} = ${incomingVal}, whereas historical precedent ${incident.id} recorded ${metricKey} = ${historicalVal}.`
+            });
+          }
+        }
       }
     }
 

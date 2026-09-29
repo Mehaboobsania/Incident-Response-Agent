@@ -38,29 +38,6 @@ interface ChatMessage {
   feedback?: Record<string, { status: 'worked' | 'failed'; reason?: string }>;
 }
 
-const SAMPLE_PROMPTS = [
-  {
-    title: 'Payments Connection Pool',
-    query: 'payments-service: Postgres connection timeout spike (active pg_connections 100/100, p99 > 8500ms, HTTP 504 on /api/v2/charge)'
-  },
-  {
-    title: 'Catalog Cache Storm',
-    query: 'catalog-search: Upstream DB query timeouts, HTTP 503 error rate > 48% on /search/items with Redis memory at 99.9%'
-  },
-  {
-    title: 'Checkout CPU 99% Scan',
-    query: 'checkout-api: Postgres CPU 99.8% (Saturation), query latency > 14000ms on SELECT * FROM orders WHERE status = PENDING'
-  },
-  {
-    title: 'Auth 401 JWKS Desync',
-    query: 'auth-gateway: 401 Unauthorized spike (68% failure rate), JWT kid not found in cached JWKS'
-  },
-  {
-    title: 'Billing Kafka Poison Pill',
-    query: 'billing-worker: Consumer group lag > 320,000 msgs on topic payments.settled, worker CPU 100% on partition 4'
-  }
-];
-
 export default function ChatbotIncidentAgent() {
   const [isMounted, setIsMounted] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -265,7 +242,7 @@ export default function ChatbotIncidentAgent() {
 
     // Find the message to get incident ID
     const targetMsg = messages.find(m => m.id === messageId);
-    const incidentId = targetMsg?.searchResult?.primaryIncident?.id || 'INC-402';
+    const incidentId = targetMsg?.searchResult?.primaryIncident?.id || allIncidents[0]?.id || '';
 
     try {
       await fetch('/api/mitigations/feedback', {
@@ -368,30 +345,45 @@ export default function ChatbotIncidentAgent() {
               Paste an alert signature, describe an outage, or ask how to resolve an issue. I check historical postmortems to recommend verified fixes, flag dangerous pitfalls, and update memory with your feedback.
             </p>
 
-            <div className="w-full flex flex-col gap-2 max-w-lg text-left">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-1">
-                Try a simulated incident alert:
-              </span>
-              <div className="flex flex-col gap-2">
-                {SAMPLE_PROMPTS.map((sample, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => handleSend(sample.query)}
-                    className="group bg-slate-900/60 hover:bg-slate-800/80 border border-slate-800/80 hover:border-slate-700 p-3 rounded-xl text-left transition-all flex items-center justify-between gap-3 text-xs"
-                  >
-                    <div>
-                      <span className="font-semibold text-white group-hover:text-indigo-300 transition-colors block">
-                        {sample.title}
-                      </span>
-                      <span className="text-[11px] text-slate-400 line-clamp-1">
-                        {sample.query}
-                      </span>
-                    </div>
-                    <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-white shrink-0 group-hover:translate-x-0.5 transition-transform" />
-                  </button>
-                ))}
+            {allIncidents.length > 0 ? (
+              <div className="w-full flex flex-col gap-2 max-w-lg text-left">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-1">
+                  Active Database Memories ({allIncidents.length}):
+                </span>
+                <div className="flex flex-col gap-2">
+                  {allIncidents.slice(0, 5).map(inc => {
+                    const alertQuery = inc.alertSignatures?.[0] || `${inc.service}: ${inc.title}`;
+                    return (
+                      <button
+                        key={inc.id}
+                        onClick={() => handleSend(alertQuery)}
+                        className="group bg-slate-900/60 hover:bg-slate-800/80 border border-slate-800/80 hover:border-slate-700 p-3 rounded-xl text-left transition-all flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold">
+                              {inc.id}
+                            </span>
+                            <span className="font-semibold text-white group-hover:text-indigo-300 transition-colors">
+                              {inc.service}: {inc.title}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-400 line-clamp-1 font-mono">
+                            {alertQuery}
+                          </span>
+                        </div>
+                        <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-white shrink-0 group-hover:translate-x-0.5 transition-transform" />
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="w-full max-w-md p-4 rounded-xl bg-slate-900/40 border border-slate-800/80 text-center text-xs text-slate-400">
+                <p className="font-medium text-slate-300 mb-1">Persistent Database Memory is Active (0 stored incidents)</p>
+                <p className="text-[11px] text-slate-500">Paste any production error, stack trace, or alert message to analyze and triage zero-day incidents.</p>
+              </div>
+            )}
           </div>
         )}
 
@@ -558,7 +550,7 @@ export default function ChatbotIncidentAgent() {
                           ) : (
                             <div className="flex items-center gap-1.5">
                               <button
-                                onClick={() => recordFeedbackWorked(msg.id, msg.searchResult!.primaryIncident?.id || 'INC-402', fix.id, fix.action)}
+                                onClick={() => recordFeedbackWorked(msg.id, msg.searchResult!.primaryIncident?.id || allIncidents[0]?.id || '', fix.id, fix.action)}
                                 className="px-2.5 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-medium text-[11px] border border-emerald-500/30 flex items-center gap-1 transition-colors"
                               >
                                 <ThumbsUp className="w-3 h-3" />
@@ -766,11 +758,18 @@ export default function ChatbotIncidentAgent() {
             </div>
 
             <div className="p-5 overflow-y-auto flex-1 flex flex-col gap-3">
-              {allIncidents.map(inc => (
-                <div
-                  key={inc.id}
-                  className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 flex flex-col gap-2"
-                >
+              {allIncidents.length === 0 ? (
+                <div className="p-12 text-center text-xs text-slate-500">
+                  <Database className="w-8 h-8 text-slate-700 mx-auto mb-2" />
+                  <p className="font-semibold text-slate-400">Database Memory is Empty</p>
+                  <p className="mt-1 text-slate-500">No incidents are stored in memory. Submit or triage an incident to store it in persistent memory.</p>
+                </div>
+              ) : (
+                allIncidents.map(inc => (
+                  <div
+                    key={inc.id}
+                    className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 flex flex-col gap-2"
+                  >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
@@ -799,7 +798,7 @@ export default function ChatbotIncidentAgent() {
                     <span>MTTR: {inc.durationMinutes}m</span>
                   </div>
                 </div>
-              ))}
+              )))}
             </div>
 
             <div className="p-3 border-t border-slate-800 flex items-center justify-between">
