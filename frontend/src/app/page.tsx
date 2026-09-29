@@ -61,6 +61,7 @@ const SAMPLE_PROMPTS = [
 ];
 
 export default function ChatbotIncidentAgent() {
+  const [isMounted, setIsMounted] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -75,6 +76,7 @@ export default function ChatbotIncidentAgent() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
+    setIsMounted(true);
     fetchIncidents();
   }, []);
 
@@ -310,7 +312,7 @@ export default function ChatbotIncidentAgent() {
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-colors"
           >
             <Database className="w-3.5 h-3.5 text-indigo-400" />
-            <span>{allIncidents.length} Postmortems</span>
+            <span suppressHydrationWarning>{isMounted ? allIncidents.length : 0} Postmortems</span>
           </button>
 
           {messages.length > 0 && (
@@ -627,13 +629,15 @@ export default function ChatbotIncidentAgent() {
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Paste a production alert, describe an outage, or ask for incident recommendations..."
+              suppressHydrationWarning
               className="w-full bg-transparent px-4 py-3 text-xs text-white placeholder-slate-500 focus:outline-none resize-none max-h-32"
             />
             <button
               onClick={() => handleSend()}
-              disabled={!input.trim() || isLoading}
+              disabled={isMounted ? (!input.trim() || isLoading) : undefined}
+              suppressHydrationWarning
               className={`mr-2 p-2 rounded-xl transition-all ${
-                input.trim() && !isLoading
+                isMounted && input.trim() && !isLoading
                   ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/20'
                   : 'bg-slate-800 text-slate-500 cursor-not-allowed'
               }`}
@@ -645,7 +649,7 @@ export default function ChatbotIncidentAgent() {
 
           <div className="flex items-center justify-between text-[11px] text-slate-500 px-2 font-mono">
             <span>Press Enter to send, Shift+Enter for new line</span>
-            <span>Grounded in {allIncidents.length} historical postmortems</span>
+            <span suppressHydrationWarning>Grounded in {isMounted ? allIncidents.length : 0} historical postmortems</span>
           </div>
         </div>
       </div>
