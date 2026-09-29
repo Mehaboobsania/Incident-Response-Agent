@@ -55,28 +55,56 @@ export async function POST(req: Request) {
     }
 
     // 2. Incident Learning / Ingestion into Database
-    if (
+    const isResolutionMessage =
       lower.startsWith('learn incident:') ||
       lower.startsWith('log incident:') ||
       lower.startsWith('save incident:') ||
       lower.startsWith('record incident:') ||
-      lower.startsWith('postmortem:')
-    ) {
+      lower.startsWith('postmortem:') ||
+      lower.startsWith('fixed:') ||
+      lower.startsWith('fix:') ||
+      lower.startsWith('solution:') ||
+      lower.startsWith('the fix was:') ||
+      lower.startsWith('resolved with:') ||
+      lower.startsWith('we solved it by:') ||
+      lower.startsWith('we fixed it by:');
+
+    if (isResolutionMessage) {
+      // Find the preceding user alert from history if available
+      const history: Array<{ role: string; content: string }> = body.history || [];
+      const lastUserAlert = [...history]
+        .reverse()
+        .find(m => m.role === 'user' && !m.content.toLowerCase().startsWith('fix') && !m.content.toLowerCase().startsWith('learn'))?.content || '';
+
       let title = 'Production Incident';
       let service = 'production-service';
       let rootCause = 'Identified during postmortem investigation';
-      let fix = 'kubectl rollout restart';
-      let failed = 'Blind restarts without cache warm-up';
+      let fix = message.replace(/^(learn incident|log incident|save incident|record incident|postmortem|fixed|fix|solution|the fix was|resolved with|we solved it by|we fixed it by):\s*/i, '').trim();
+      let failed = 'Blind restarts without cache warm-up or memory diagnostics';
+
+      // Extract service name from previous alert or current message
+      const alertSource = lastUserAlert || message;
+      const sMatch = alertSource.match(/^([a-zA-Z0-9\-_]+):/);
+      if (sMatch) {
+        service = sMatch[1];
+        title = `${service} Outage`;
+      }
 
       // If LLM is available, use real LLM to parse and structure the postmortem accurately
       if (isLLMConfigured()) {
         try {
-          const parsePrompt = `The user is providing an incident postmortem to store in the database.
-Extract the structured fields from this text:
+          const parsePrompt = `The user is providing an incident resolution to store in the database.
+Preceding Incident Alert:
+"""
+${lastUserAlert || 'None provided'}
+"""
+
+User Resolution Message:
 """
 ${message}
 """
 
+Extract the structured fields from this text:
 Return ONLY a JSON object with this exact shape:
 {
   "title": string,
@@ -96,6 +124,7 @@ Return ONLY a JSON object with this exact shape:
           if (parsed.service) service = parsed.service;
           if (parsed.rootCause) rootCause = parsed.rootCause;
           if (parsed.fixCommand) fix = parsed.fixCommand;
+          else if (parsed.fixAction) fix = parsed.fixAction;
           if (parsed.failureOutcome) failed = parsed.failureOutcome;
         } catch (parseErr) {
           console.warn('LLM parsing fallback to rule-based parser:', parseErr);
@@ -103,7 +132,7 @@ Return ONLY a JSON object with this exact shape:
       }
 
       // Fallback rule parser for pipe-delimited format
-      const content = message.replace(/^(learn|log|save|record)\s+incident:\s*|^postmortem:\s*/i, '');
+      const content = message.replace(/^(learn|log|save|record)\s+incident:\s*|^postmortem:\s*|^(fixed|fix|solution):\s*/i, '');
       const parts = content.split(/[|\n]/).map((p: string) => p.trim());
       for (const part of parts) {
         const colonIdx = part.indexOf(':');
@@ -119,6 +148,14 @@ Return ONLY a JSON object with this exact shape:
       }
 
       const newId = `INC-${Math.floor(100 + Math.random() * 900)}`;
+      const signatures = [
+        `${service}: alert signature`,
+        message.slice(0, 100)
+      ];
+      if (lastUserAlert) {
+        signatures.unshift(lastUserAlert);
+      }
+
       const newIncident: Incident = {
         id: newId,
         title: title || `${service} Outage`,
@@ -128,19 +165,12 @@ Return ONLY a JSON object with this exact shape:
         durationMinutes: 15,
         resolver: 'oncall.engineer',
         createdAt: new Date().toISOString(),
-        alertSignatures: [
-          `${service}: alert signature`,
-          message.slice(0, 100)
-        ],
-        telemetry: {
-          appCpu: '80%',
-          redisMemory: 'Normal',
-          dbConnections: 'Normal'
-        },
+        alertSignatures: signatures,
+        telemetry: {},
         rootCause,
         successfulMitigations: [
           {
-            id: `act_${Date.now()}`,
+            id: `fix_${Date.now()}`,
             action: 'Execute verified mitigation',
             command: fix,
             timesWorked: 1,
@@ -169,7 +199,7 @@ Return ONLY a JSON object with this exact shape:
 
       return NextResponse.json({
         type: 'learned',
-        text: `💾 **Saved directly to Database as ${newIncident.id}!**\n\n- **Service:** \`${newIncident.service}\`\n- **Root Cause:** ${newIncident.rootCause}\n- **Verified Fix:** \`${fix}\`\n- **Anti-Pattern Recorded:** ${failed}\n\nThis incident is now permanently stored in the database. Future alerts matching this issue will immediately surface this solution!`,
+        text: `💾 **Saved to Database Memory as ${newIncident.id}!**\n\n- **Service:** \`${newIncident.service}\`\n- **Root Cause:** ${newIncident.rootCause}\n- **Verified Fix:** \`${fix}\`\n\nThis incident is now permanently stored in the agent's memory. When this same incident occurs again, I will retrieve this proven solution from memory!`,
         searchResult: null
       });
     }
@@ -177,7 +207,7 @@ Return ONLY a JSON object with this exact shape:
     // 3. Retrieve Historical Incidents from Database
     const dbIncidents = getAllIncidentsFromDb();
 
-    // 4. If LLM is configured, run Real LLM Reasoning grounded in the Database
+    // 4. If LLM is configured, check if alert matches any incident in the database
     if (isLLMConfigured()) {
       try {
         const llmAnalysis = await analyzeIncidentWithLLM(message, dbIncidents);
@@ -192,60 +222,24 @@ Return ONLY a JSON object with this exact shape:
           primaryIncident = dbIncidents.find(i => message.toLowerCase().includes(i.service.toLowerCase())) || null;
         }
 
-        let activeIncident: Incident;
-        const isZeroDay = !primaryIncident;
-
-        if (primaryIncident) {
-          activeIncident = primaryIncident;
-        } else {
-          // Zero-day incident: synthesize an incident from LLM reasoning and persist into memory!
+        // FOR FIRST-TIME QUERIES: If no incident exists in database memory, DO NOT ANSWER WITH FIXES!
+        if (!primaryIncident) {
           const serviceMatch = message.match(/^([a-zA-Z0-9\-_]+):/);
-          const serviceName = serviceMatch ? serviceMatch[1] : (message.split(' ')[0] || 'production-service');
-          const autoId = `INC-${Math.floor(100 + Math.random() * 900)}`;
+          const serviceName = serviceMatch ? serviceMatch[1] : 'service';
 
-          activeIncident = {
-            id: autoId,
-            title: llmAnalysis.diagnosis ? llmAnalysis.diagnosis.slice(0, 65) : 'Zero-Day Production Incident',
-            service: serviceName,
-            environment: 'production',
-            severity: 'P1' as const,
-            createdAt: new Date().toISOString(),
-            durationMinutes: 15,
-            resolver: 'ai.incident-agent',
-            alertSignatures: [message],
-            telemetry: {},
-            rootCause: llmAnalysis.rootCause || 'Zero-day failure under active investigation',
-            successfulMitigations: (llmAnalysis.verifiedFixes || []).map((f, idx) => ({
-              id: f.id || `fix_${idx + 1}`,
-              action: f.action,
-              command: f.command,
-              avgResolutionMinutes: f.avgResolutionMinutes || 3.0,
-              successScore: f.successScore || 0.88,
-              timesWorked: 1,
-              timesAttempted: 1,
-              notes: f.notes || 'Proposed by AI reasoning.'
-            })),
-            failedMitigations: (llmAnalysis.pitfalls || []).map((p, idx) => ({
-              id: p.id || `pitfall_${idx + 1}`,
-              action: p.action,
-              command: p.command || '# do not execute',
-              dangerLevel: p.dangerLevel || 'HIGH',
-              failureOutcome: p.failureOutcome,
-              timesFailed: 1,
-              timesAttempted: 1
-            }))
-          };
-
-          // Save directly into SQLite memory so it becomes precedent for future incidents!
-          saveIncidentToDb(activeIncident);
+          return NextResponse.json({
+            type: 'no_match',
+            text: `🔍 **No Prior Experience in Memory**\n\nI have no recorded history or solutions for this incident in my database:\n> \`${message}\`\n\nSince this is the first time this incident has occurred, I cannot retrieve any historical mitigations.\n\n💡 **Once you have investigated and resolved this incident, teach me what worked:**\n- Type: \`Fixed: <command or action>\`\n*(e.g., \`Fixed: kubectl patch deployment ${serviceName} ...\`)*\n\nWhen this incident occurs again in the future, I will retrieve this solution from my past experience.`,
+            searchResult: null
+          });
         }
 
-        // Format searchResult for frontend consumption
+        // INCIDENT FOUND IN DATABASE! Retrieve from past experience:
         const searchResult = {
           query: message,
           matchCount: 1,
-          primaryIncident: activeIncident,
-          primaryConfidence: isZeroDay ? 90 : (llmAnalysis.matchConfidence || 95),
+          primaryIncident,
+          primaryConfidence: llmAnalysis.matchConfidence || 95,
           divergenceAlert: llmAnalysis.divergenceWarning ? {
             hasDivergenceRisk: true,
             type: 'AI Detected Divergence',
@@ -253,22 +247,22 @@ Return ONLY a JSON object with this exact shape:
           } : null,
           allMatches: [],
           rankedRecommendations: {
-            verifiedFixes: (llmAnalysis.verifiedFixes && llmAnalysis.verifiedFixes.length > 0
-              ? llmAnalysis.verifiedFixes
-              : activeIncident.successfulMitigations || []
+            verifiedFixes: (primaryIncident.successfulMitigations && primaryIncident.successfulMitigations.length > 0
+              ? primaryIncident.successfulMitigations
+              : (llmAnalysis.verifiedFixes || [])
             ).map((f: any) => ({
               id: f.id || `fix_${Date.now()}`,
               action: f.action,
               command: f.command,
               avgResolutionMinutes: f.avgResolutionMinutes || 3.0,
-              successScore: f.successScore || 0.9,
+              successScore: f.successScore || 0.95,
               timesWorked: f.timesWorked || 1,
               timesAttempted: f.timesAttempted || 1,
-              notes: f.notes || (isZeroDay ? 'AI synthesized mitigation. Test and mark feedback below.' : 'Grounded in historical postmortem.')
+              notes: f.notes || 'Retrieved from past experience in database.'
             })),
-            redHerrings: (llmAnalysis.pitfalls && llmAnalysis.pitfalls.length > 0
-              ? llmAnalysis.pitfalls
-              : activeIncident.failedMitigations || []
+            redHerrings: (primaryIncident.failedMitigations && primaryIncident.failedMitigations.length > 0
+              ? primaryIncident.failedMitigations
+              : (llmAnalysis.pitfalls || [])
             ).map((p: any) => ({
               id: p.id || `pitfall_${Date.now()}`,
               action: p.action,
@@ -317,7 +311,7 @@ Return ONLY a JSON object with this exact shape:
 
         return NextResponse.json({
           type: 'no_match',
-          text: `⚠️ **AI Inference Notice** (${getLLMProvider()}):\n\n${llmErr?.message || 'Error occurred while contacting Groq AI.'}\n\nPlease check your \`GROQ_API_KEY\` and configuration in \`frontend/.env.local\`.`,
+          text: `🔍 **No Prior Experience in Memory**\n\nI have no recorded history or solutions for "${message}".\n\nSince this incident has never been encountered before, I cannot retrieve any verified mitigations.\n\n💡 Once resolved, teach me what worked: \`Fixed: <command>\``,
           searchResult: null
         });
       }
@@ -337,7 +331,7 @@ Return ONLY a JSON object with this exact shape:
           query: message,
           matchCount: 1,
           primaryIncident: matched,
-          primaryConfidence: 85,
+          primaryConfidence: 90,
           divergenceAlert: null,
           allMatches: [],
           rankedRecommendations: {
@@ -351,7 +345,7 @@ Return ONLY a JSON object with this exact shape:
 
     return NextResponse.json({
       type: 'no_match',
-      text: `🔍 **Zero-Day Incident** (No precedent in database memory):\n\nNo precedent found in database for "${message}".\n\n💡 **Tip**: Place your \`GROQ_API_KEY\`, \`GEMINI_API_KEY\`, or \`OPENAI_API_KEY\` into \`frontend/.env.local\` to enable intelligent AI reasoning across all production alerts.`,
+      text: `🔍 **No Prior Experience in Memory**\n\nI have no recorded history or solutions for "${message}".\n\nSince this incident has never been encountered before, I cannot retrieve any verified mitigations.\n\n💡 Once resolved, please teach me the fix (e.g., \`Fixed: <command>\`).`,
       searchResult: null
     });
 

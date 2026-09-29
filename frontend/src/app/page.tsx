@@ -125,7 +125,13 @@ export default function ChatbotIncidentAgent() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: query })
+        body: JSON.stringify({
+          message: query,
+          history: messages.map(m => ({
+            role: m.role,
+            content: m.content || m.searchResult?.primaryIncident?.title || ''
+          }))
+        })
       });
       const data = await res.json();
 
