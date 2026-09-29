@@ -35,7 +35,7 @@ export function isLLMConfigured(): boolean {
 
 export function getLLMProvider(): string {
   if (process.env.GROQ_API_KEY) {
-    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'openai/gpt-oss-120b';
+    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'qwen/qwen3.8-27b';
     return `Groq (${model})`;
   }
   if (process.env.GEMINI_API_KEY) return 'Google Gemini';
@@ -65,7 +65,13 @@ export async function callLLM(options: {
 
   // 1. Groq API (First-class ultra-fast inference)
   if (groqKey) {
-    const model = process.env.GROQ_MODEL || process.env.LLM_MODEL || 'openai/gpt-oss-120b';
+    const candidateModels = [
+      process.env.GROQ_MODEL,
+      process.env.LLM_MODEL,
+      'qwen/qwen3.8-27b',
+      'openai/gpt-oss-120b'
+    ].filter(Boolean) as string[];
+    const modelsToTry = Array.from(new Set(candidateModels));
     const url = 'https://api.groq.com/openai/v1/chat/completions';
 
     const messages = [];
@@ -74,36 +80,66 @@ export async function callLLM(options: {
     }
     messages.push({ role: 'user', content: userPrompt });
 
-    const body: any = {
-      model,
-      messages,
-      temperature: 0.1
-    };
+    let lastError: Error | null = null;
 
-    if (jsonMode) {
-      body.response_format = { type: 'json_object' };
+    for (const model of modelsToTry) {
+      const body: any = {
+        model,
+        messages,
+        temperature: 0.1
+      };
+
+      if (jsonMode) {
+        body.response_format = { type: 'json_object' };
+      }
+
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${groqKey}`
+          },
+          body: JSON.stringify(body)
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          if (
+            res.status === 404 ||
+            res.status === 429 ||
+            errText.includes('model_not_found') ||
+            errText.includes('rate_limit_exceeded') ||
+            errText.includes('does not exist')
+          ) {
+            console.warn(`Groq model ${model} unavailable (${res.status}), attempting next fallback...`);
+            lastError = new Error(`Groq model ${model} error (${res.status}): ${errText}`);
+            continue;
+          }
+          throw new Error(`Groq API error (${res.status}): ${errText}`);
+        }
+
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content;
+        if (!content) {
+          throw new Error(`Groq model ${model} returned an empty response.`);
+        }
+        return content;
+      } catch (err: any) {
+        lastError = err;
+        if (
+          err.message?.includes('404') ||
+          err.message?.includes('429') ||
+          err.message?.includes('rate_limit') ||
+          err.message?.includes('model_not_found')
+        ) {
+          continue;
+        }
+        throw err;
+      }
     }
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${groqKey}`
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Groq API error (${res.status}): ${errText}`);
-    }
-
-    const data = await res.json();
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error('Groq API returned an empty response.');
-    }
-    return content;
+    throw lastError || new Error('All Groq candidate models failed.');
   }
 
   // 2. Google Gemini API
