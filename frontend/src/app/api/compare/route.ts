@@ -16,9 +16,10 @@ export async function POST(req: Request) {
     const bestFix = iraResult.rankedRecommendations.verifiedFixes[0];
     const topRedHerring = iraResult.rankedRecommendations.redHerrings[0];
 
-    const mttrZero = zeroMemoryResult.estimatedMttrMinutes;
-    const mttrIra = bestFix ? bestFix.avgResolutionMinutes : 4.0;
-    const mttrReductionPct = Math.round((1 - mttrIra / mttrZero) * 100);
+    const mttrZero = zeroMemoryResult.estimatedMttrMinutes || 45;
+    const mttrIra = bestFix ? (bestFix.avgResolutionMinutes || 5.0) : 10.0;
+    const mttrReductionPct = Math.max(0, Math.min(99, Math.round((1 - mttrIra / mttrZero) * 100)));
+    const savedMinutes = Math.max(1, Math.round(mttrZero - mttrIra));
 
     return NextResponse.json({
       zeroMemoryAgent: zeroMemoryResult,
@@ -27,8 +28,8 @@ export async function POST(req: Request) {
         mttrZeroMinutes: mttrZero,
         mttrIraMinutes: mttrIra,
         mttrReductionPercent: mttrReductionPct,
-        falseActionAvoided: topRedHerring ? topRedHerring.action : "Dangerous pod rollout restart",
-        estimatedOutageSavedMinutes: 24,
+        falseActionAvoided: topRedHerring ? topRedHerring.action : "Dangerous blind restarts and uncoordinated scaling",
+        estimatedOutageSavedMinutes: savedMinutes,
         divergenceRiskDetected: !!iraResult.divergenceAlert?.hasDivergenceRisk
       }
     });

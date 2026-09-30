@@ -5,7 +5,7 @@ export interface MitigationAction {
   timesWorked: number;
   timesAttempted: number;
   avgResolutionMinutes: number;
-  successScore: number;
+  successScore?: number;
   notes: string;
   sourceIncidentId?: string;
   sourceIncidentTitle?: string;
@@ -75,6 +75,8 @@ export interface SearchResult {
   query: string | object;
   matchCount: number;
   isZeroDay?: boolean;
+  isFurtherImprovement?: boolean;
+  previouslyAppliedFixes?: MitigationAction[];
   primaryIncident: Incident | null;
   primaryConfidence: number;
   divergenceAlert: DivergenceAlert | null;

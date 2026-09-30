@@ -8,33 +8,33 @@ export class GenericAgent {
     const text = rawText.toLowerCase();
 
     // Extract dynamic service identifier if present
-    const serviceMatch = text.match(/([a-z0-9_-]+(?:service|api|worker|gateway|app))/i);
-    const targetService = (typeof alert === 'object' && alert.service) ? alert.service : (serviceMatch ? serviceMatch[1] : 'application');
+    const serviceMatch = text.match(/([a-z0-9_-]+(?:service|api|worker|gateway|app|broker|cluster|db))/i);
+    const targetService = (typeof alert === 'object' && alert.service) ? alert.service : (serviceMatch ? serviceMatch[1] : 'service');
 
     const steps: GenericAgentPlanStep[] = [
       {
         order: 1,
         step: `Inspect Pod & Container Logs for ${targetService}`,
         command: `kubectl logs -l app=${targetService} --tail=200 --timestamps`,
-        rationale: "Generic initial step: check stdout and stderr for unhandled exceptions or error codes."
+        rationale: "Generic initial step: inspect standard output and standard error for unhandled exceptions or error codes."
       },
       {
         order: 2,
-        step: `Check Network Reachability & Upstream Dependencies`,
+        step: `Check Network Reachability & Upstream Dependencies for ${targetService}`,
         command: `curl -ivs https://${targetService}.internal/healthz || ping -c 3 ${targetService}`,
         rationale: "Generic connectivity check to verify whether pods are actively listening on network sockets."
       },
       {
         order: 3,
-        step: `Perform Rolling Restart of Pods`,
+        step: `Perform Rolling Restart of ${targetService} Pods`,
         command: `kubectl rollout restart deployment/${targetService}`,
         rationale: "Generic recovery attempt: restart containers to release memory leaks, stuck goroutines, or hung connections.",
         isDangerous: true,
-        risk: "Dangerous without incident memory. In cache stampede or connection pool saturation, restarts trigger massive cold start thundering herds that collapse upstream databases."
+        risk: "Dangerous without incident memory. In cache stampedes or connection pool saturation, restarts trigger cold-start thundering herds that collapse upstream databases."
       },
       {
         order: 4,
-        step: `Scale Replicas Horizontally`,
+        step: `Scale Replicas Horizontally for ${targetService}`,
         command: `kubectl scale deployment/${targetService} --replicas=8`,
         rationale: "Generic scaling attempt: distribute load across more pods.",
         isDangerous: true,
@@ -47,8 +47,8 @@ export class GenericAgent {
       confidence: "Low (Zero historical organizational memory)",
       identifiedCategory: `Unindexed ${targetService} Incident`,
       estimatedMttrMinutes: 45,
-      systemSpecificKnowledge: "None. Blind guessing using standard textbook runbooks.",
-      summary: `Standard generalist AI with zero memory. It blindly suggests container restarts and scaling without knowing whether restarts caused outages previously.`,
+      systemSpecificKnowledge: "None. Blind guessing using standard textbook runbooks without past incident experience.",
+      summary: `Standard generalist AI without historical memory. Blindly suggests generic restarts and scaling without knowing prior outcomes.`,
       mitigationPlan: steps,
       warnings: [
         "⚠️ No past postmortems indexed. High probability of repeating past mistakes.",

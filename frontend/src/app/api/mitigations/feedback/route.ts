@@ -12,7 +12,7 @@ export async function POST(req: Request) {
     }
 
     // Persist directly into the SQLite database!
-    recordFeedbackInDb(incidentId, actionId, outcome, notes, engineer);
+    recordFeedbackInDb(incidentId, actionId, outcome, notes, engineer, actionTitle, command);
 
     // Also update engine in-memory cache if active
     const engine = getHindsightEngine();
