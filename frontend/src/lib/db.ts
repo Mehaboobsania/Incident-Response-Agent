@@ -31,7 +31,7 @@ function getStoragePaths() {
     rootDataDir = path.resolve(cwd, 'data');
   }
 
-  if (!fs.existsSync(rootDataDir)) {
+  if (!fs.existsSync(/*turbopackIgnore: true*/ rootDataDir)) {
     try {
       fs.mkdirSync(rootDataDir, { recursive: true });
     } catch (e) {}
@@ -42,7 +42,7 @@ function getStoragePaths() {
   
   // Also check local frontend data directory for Next.js bundling fallback
   let frontendJsonPath = path.join(cwd, 'src', 'lib', 'data', 'incidents.json');
-  if (path.basename(cwd).toLowerCase() !== 'frontend' && fs.existsSync(path.join(cwd, 'frontend'))) {
+  if (path.basename(cwd).toLowerCase() !== 'frontend' && fs.existsSync(/*turbopackIgnore: true*/ path.join(cwd, 'frontend'))) {
     frontendJsonPath = path.join(cwd, 'frontend', 'src', 'lib', 'data', 'incidents.json');
   }
 
@@ -50,6 +50,7 @@ function getStoragePaths() {
 }
 
 let dbInstance: any = null;
+let memoryCache: Incident[] = [];
 
 export function getDatabase(): any {
   if (dbInstance) return dbInstance;
@@ -59,7 +60,7 @@ export function getDatabase(): any {
   if (DatabaseSyncClass) {
     try {
       const dir = path.dirname(dbPath);
-      if (!fs.existsSync(dir)) {
+      if (!fs.existsSync(/*turbopackIgnore: true*/ dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
 
@@ -201,15 +202,23 @@ export function saveIncidentToDb(inc: Incident): void {
     }
   }
 
+  // Update in-memory cache for instant zero-latency retrieval
+  const memIdx = memoryCache.findIndex(i => i.id === inc.id);
+  if (memIdx >= 0) {
+    memoryCache[memIdx] = inc;
+  } else {
+    memoryCache.unshift(inc);
+  }
+
   // Also persist to disk JSON so both SQLite and JSON stay synchronized
   const { rootJsonPath, frontendJsonPath } = getStoragePaths();
-  const pathsToSync = [rootJsonPath, frontendJsonPath].filter(p => p && fs.existsSync(path.dirname(p)));
+  const pathsToSync = [rootJsonPath, frontendJsonPath].filter(p => p && fs.existsSync(/*turbopackIgnore: true*/ path.dirname(p)));
 
   for (const jsonPath of pathsToSync) {
     try {
       let list: Incident[] = [];
-      if (fs.existsSync(jsonPath)) {
-        const raw = fs.readFileSync(jsonPath, 'utf8').trim();
+      if (fs.existsSync(/*turbopackIgnore: true*/ jsonPath)) {
+        const raw = fs.readFileSync(/*turbopackIgnore: true*/ jsonPath, 'utf8').trim();
         if (raw) {
           list = JSON.parse(raw);
         }
@@ -228,105 +237,117 @@ export function saveIncidentToDb(inc: Incident): void {
 }
 
 export function getAllIncidentsFromDb(): Incident[] {
-  const db = getDatabase();
+  try {
+    const db = getDatabase();
 
   if (db && !db.isFallback) {
     try {
       const incRows: any[] = db.prepare('SELECT * FROM incidents ORDER BY created_at DESC').all();
-      return incRows.map(row => {
-        const mitigations: any[] = db.prepare('SELECT * FROM mitigations WHERE incident_id = ?').all(row.id);
-        const antiPatterns: any[] = db.prepare('SELECT * FROM anti_patterns WHERE incident_id = ?').all(row.id);
+        const result = incRows.map(row => {
+          const mitigations: any[] = db.prepare('SELECT * FROM mitigations WHERE incident_id = ?').all(row.id);
+          const antiPatterns: any[] = db.prepare('SELECT * FROM anti_patterns WHERE incident_id = ?').all(row.id);
 
-        const antiPatternActionSet = new Set(antiPatterns.map(f => (f.action || '').trim().toLowerCase()));
-        const antiPatternCmdSet = new Set(antiPatterns.map(f => (f.command || '').trim().toLowerCase()).filter(Boolean));
+          const antiPatternActionSet = new Set(antiPatterns.map(f => (f.action || '').trim().toLowerCase()));
+          const antiPatternCmdSet = new Set(antiPatterns.map(f => (f.command || '').trim().toLowerCase()).filter(Boolean));
 
-        const cleanMitigations = mitigations.filter(m => {
-          const act = (m.action || '').trim().toLowerCase();
-          const cmd = (m.command || '').trim().toLowerCase();
-          if (antiPatternActionSet.has(act)) return false;
-          if (cmd && antiPatternCmdSet.has(cmd) && cmd !== '# manual command' && cmd !== '# execute command') return false;
-          return true;
+          const cleanMitigations = mitigations.filter(m => {
+            const act = (m.action || '').trim().toLowerCase();
+            const cmd = (m.command || '').trim().toLowerCase();
+            if (antiPatternActionSet.has(act)) return false;
+            if (cmd && antiPatternCmdSet.has(cmd) && cmd !== '# manual command' && cmd !== '# execute command') return false;
+            return true;
+          });
+
+          return {
+            id: row.id,
+            title: row.title,
+            service: row.service,
+            severity: row.severity,
+            environment: row.environment,
+            rootCause: row.root_cause,
+            telemetry: JSON.parse(row.telemetry || '{}'),
+            alertSignatures: JSON.parse(row.alert_signatures || '[]'),
+            resolver: row.resolver,
+            durationMinutes: row.duration_minutes,
+            createdAt: row.created_at,
+            resolvedAt: row.resolved_at,
+            successfulMitigations: cleanMitigations.map(m => ({
+              id: m.id,
+              action: m.action,
+              command: m.command,
+              timesWorked: m.times_worked,
+              timesAttempted: m.times_attempted,
+              avgResolutionMinutes: m.avg_resolution_minutes,
+              successScore: m.success_score,
+              notes: m.notes,
+              sourceIncidentId: row.id,
+              sourceIncidentTitle: row.title
+            })),
+            failedMitigations: antiPatterns.map(f => ({
+              id: f.id,
+              action: f.action,
+              command: f.command,
+              timesFailed: f.times_failed,
+              timesAttempted: f.times_attempted,
+              dangerLevel: f.danger_level,
+              failureOutcome: f.failure_outcome,
+              sourceIncidentId: row.id,
+              sourceIncidentTitle: row.title
+            }))
+          };
         });
 
-        return {
-          id: row.id,
-          title: row.title,
-          service: row.service,
-          severity: row.severity,
-          environment: row.environment,
-          rootCause: row.root_cause,
-          telemetry: JSON.parse(row.telemetry || '{}'),
-          alertSignatures: JSON.parse(row.alert_signatures || '[]'),
-          resolver: row.resolver,
-          durationMinutes: row.duration_minutes,
-          createdAt: row.created_at,
-          resolvedAt: row.resolved_at,
-          successfulMitigations: cleanMitigations.map(m => ({
-            id: m.id,
-            action: m.action,
-            command: m.command,
-            timesWorked: m.times_worked,
-            timesAttempted: m.times_attempted,
-            avgResolutionMinutes: m.avg_resolution_minutes,
-            successScore: m.success_score,
-            notes: m.notes,
-            sourceIncidentId: row.id,
-            sourceIncidentTitle: row.title
-          })),
-          failedMitigations: antiPatterns.map(f => ({
-            id: f.id,
-            action: f.action,
-            command: f.command,
-            timesFailed: f.times_failed,
-            timesAttempted: f.times_attempted,
-            dangerLevel: f.danger_level,
-            failureOutcome: f.failure_outcome,
-            sourceIncidentId: row.id,
-            sourceIncidentTitle: row.title
-          }))
-        };
-      });
-    } catch (e) {
-      console.error('Error reading from SQLite:', e);
-    }
-  }
-
-  // Fallback to disk JSON only if SQLite was empty or unavailable
-  const { rootJsonPath, frontendJsonPath } = getStoragePaths();
-  const searchPaths = [rootJsonPath, frontendJsonPath];
-  for (const p of searchPaths) {
-    if (fs.existsSync(p)) {
-      try {
-        const raw = fs.readFileSync(p, 'utf8').trim();
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            return parsed.map((inc: Incident) => {
-              const failedSet = new Set((inc.failedMitigations || []).map(f => (f.action || '').trim().toLowerCase()));
-              const failedCmds = new Set((inc.failedMitigations || []).map(f => (f.command || '').trim().toLowerCase()).filter(Boolean));
-              return {
-                ...inc,
-                successfulMitigations: (inc.successfulMitigations || []).filter(m => {
-                  const act = (m.action || '').trim().toLowerCase();
-                  const cmd = (m.command || '').trim().toLowerCase();
-                  if (failedSet.has(act)) return false;
-                  if (cmd && failedCmds.has(cmd) && cmd !== '# manual command' && cmd !== '# execute command') return false;
-                  return true;
-                })
-              };
-            });
-          }
+        if (result.length > 0) {
+          memoryCache = result;
+          return result;
         }
-      } catch (err) {
-        console.error('Failed to read fallback incidents:', err);
+      } catch (e) {
+        console.error('Error reading from SQLite:', e);
       }
     }
-  }
 
-  return [];
+    // Fallback to disk JSON only if SQLite was empty or unavailable
+    const { rootJsonPath, frontendJsonPath } = getStoragePaths();
+    const searchPaths = [rootJsonPath, frontendJsonPath];
+    for (const p of searchPaths) {
+      if (fs.existsSync(/*turbopackIgnore: true*/ p)) {
+        try {
+          const raw = fs.readFileSync(/*turbopackIgnore: true*/ p, 'utf8').trim();
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              const res = parsed.map((inc: Incident) => {
+                const failedSet = new Set((inc.failedMitigations || []).map(f => (f.action || '').trim().toLowerCase()));
+                const failedCmds = new Set((inc.failedMitigations || []).map(f => (f.command || '').trim().toLowerCase()).filter(Boolean));
+                return {
+                  ...inc,
+                  successfulMitigations: (inc.successfulMitigations || []).filter(m => {
+                    const act = (m.action || '').trim().toLowerCase();
+                    const cmd = (m.command || '').trim().toLowerCase();
+                    if (failedSet.has(act)) return false;
+                    if (cmd && failedCmds.has(cmd) && cmd !== '# manual command' && cmd !== '# execute command') return false;
+                    return true;
+                  })
+                };
+              });
+              memoryCache = res;
+              return res;
+            }
+          }
+        } catch (err) {
+          console.error('Failed to read fallback incidents:', err);
+        }
+      }
+    }
+
+    return memoryCache.length > 0 ? memoryCache : [];
+  } catch (outerErr) {
+    return memoryCache;
+  }
 }
 
 export function clearAllIncidentsFromDb(): void {
+  memoryCache = [];
   const db = getDatabase();
 
   if (db && !db.isFallback) {
@@ -345,7 +366,7 @@ export function clearAllIncidentsFromDb(): void {
   // Clear JSON storage files
   const { rootJsonPath, frontendJsonPath } = getStoragePaths();
   for (const p of [rootJsonPath, frontendJsonPath]) {
-    if (fs.existsSync(p)) {
+    if (fs.existsSync(/*turbopackIgnore: true*/ p)) {
       try {
         fs.writeFileSync(p, '[]', 'utf8');
       } catch (e) {
@@ -437,12 +458,48 @@ export function recordFeedbackInDb(
     }
   }
 
+  // Update memoryCache immediately
+  const cachedInc = memoryCache.find(i => i.id === incidentId);
+  if (cachedInc) {
+    if (outcome === 'worked') {
+      const mit = (cachedInc.successfulMitigations || []).find(m => m.id === actionId);
+      if (mit) {
+        mit.timesWorked = (mit.timesWorked || 0) + 1;
+        mit.timesAttempted = (mit.timesAttempted || 0) + 1;
+        mit.successScore = Math.min(1.0, Math.round(((mit.timesWorked + 1) / (mit.timesAttempted + 1)) * 100) / 100);
+        if (notes) mit.notes = `${mit.notes} [Confirmed: ${notes}]`;
+      } else {
+        cachedInc.successfulMitigations = cachedInc.successfulMitigations || [];
+        cachedInc.successfulMitigations.push({
+          id: actionId,
+          action: actionTitle || 'Verified Resolution Action',
+          command: command || '# manual command',
+          timesWorked: 1,
+          timesAttempted: 1,
+          avgResolutionMinutes: 5.0,
+          successScore: 1.0,
+          notes: notes || 'Verified via user feedback'
+        });
+      }
+      cachedInc.failedMitigations = (cachedInc.failedMitigations || []).filter(
+        f => f.action.trim().toLowerCase() !== (actionTitle || mit?.action || '').trim().toLowerCase()
+      );
+    } else {
+      const mit = (cachedInc.successfulMitigations || []).find(m => m.id === actionId);
+      const resolvedAction = (mit ? mit.action : (actionTitle || 'Attempted Triage Action')).trim();
+      const resolvedCmd = (mit ? mit.command : (command || '# attempted command')).trim();
+      cachedInc.successfulMitigations = (cachedInc.successfulMitigations || []).filter(
+        m => m.id !== actionId && m.action.trim().toLowerCase() !== resolvedAction.toLowerCase()
+      );
+    }
+  }
+
   // Also update disk storage
   const { rootJsonPath, frontendJsonPath } = getStoragePaths();
   for (const jsonPath of [rootJsonPath, frontendJsonPath]) {
     try {
-      if (fs.existsSync(jsonPath)) {
-        const raw = fs.readFileSync(jsonPath, 'utf8').trim();
+      if (fs.existsSync(/*turbopackIgnore: true*/ jsonPath)) {
+        const raw = fs.readFileSync(/*turbopackIgnore: true*/ jsonPath, 'utf8').trim();
         if (!raw) continue;
         const list: Incident[] = JSON.parse(raw);
         const inc = list.find(i => i.id === incidentId);

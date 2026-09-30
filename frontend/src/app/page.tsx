@@ -115,7 +115,14 @@ export default function ChatbotIncidentAgent() {
 
       let assistantMessage: ChatMessage;
 
-      if (data.type === 'greeting') {
+      if (!res.ok || data.error) {
+        assistantMessage = {
+          id: `asst_${Date.now()}`,
+          role: 'assistant',
+          content: `⚠️ ${data.error || data.text || 'An unexpected error occurred while communicating with the incident memory engine. Please try again.'}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+      } else if (data.type === 'greeting') {
         assistantMessage = {
           id: `asst_${Date.now()}`,
           role: 'assistant',
