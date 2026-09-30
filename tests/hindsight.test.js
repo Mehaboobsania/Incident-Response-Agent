@@ -11,10 +11,52 @@ const GenericAgent = require('../engine/generic_agent');
 
 console.log('🧪 Starting Incident Response Agent (IRA) Test Suite...\n');
 
-// 1. Initialize Engine
+// 1. Initialize Engine with dedicated isolated test fixture
 const testDataPath = path.join(__dirname, 'test_incidents.json');
-// Copy baseline data to test path so we don't mutate primary data in tests
-fs.copyFileSync(path.join(__dirname, '..', 'data', 'incidents.json'), testDataPath);
+const mockIncidents = [
+  {
+    id: 'INC-402',
+    title: 'Payment Gateway DB Connection Saturation',
+    service: 'payments-service',
+    severity: 'P1',
+    environment: 'production',
+    durationMinutes: 18,
+    resolver: 'sre.oncall',
+    createdAt: '2026-09-20T10:00:00Z',
+    alertSignatures: ['database timeouts on the payments service active pg_connections saturated'],
+    telemetry: {
+      dbConnections: '98/100 (Saturated)',
+      dbCpu: '94%',
+      redisMemory: '12%'
+    },
+    rootCause: 'Connection pool exhaustion from unclosed DB sessions',
+    successfulMitigations: [
+      {
+        id: 'act_drain_and_bump_pool',
+        action: 'Drain idle connections and bump pool capacity',
+        command: 'psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = \'idle\';"',
+        timesWorked: 3,
+        timesAttempted: 3,
+        avgResolutionMinutes: 3.5,
+        successScore: 0.95,
+        notes: 'Safely restores connection availability'
+      }
+    ],
+    failedMitigations: [
+      {
+        id: 'act_restart_deployment',
+        action: 'Rolling restart of payments deployment',
+        command: 'kubectl rollout restart deployment/payments-service',
+        timesFailed: 5,
+        timesAttempted: 5,
+        dangerLevel: 'CRITICAL',
+        failureOutcome: 'Cold start storm caused total upstream DB crash'
+      }
+    ],
+    divergenceWarning: 'Surface alert looks like DB CPU spike, but root cause is connection leak.'
+  }
+];
+fs.writeFileSync(testDataPath, JSON.stringify(mockIncidents, null, 2), 'utf8');
 
 const engine = new HindsightEngine(testDataPath);
 const generic = new GenericAgent();

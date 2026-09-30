@@ -27,7 +27,7 @@ export class HindsightEngine {
     try {
       const { getAllIncidentsFromDb } = require('./db');
       const fromDb = getAllIncidentsFromDb();
-      if (Array.isArray(fromDb) && fromDb.length > 0) {
+      if (Array.isArray(fromDb)) {
         this.incidents = fromDb;
         return;
       }
@@ -298,7 +298,18 @@ export class HindsightEngine {
       }
     }
 
-    allSuccessful.sort((a, b) => {
+    const failedActions = new Set(allFailed.map(f => (f.action || '').trim().toLowerCase()));
+    const failedCommands = new Set(allFailed.map(f => (f.command || '').trim().toLowerCase()).filter(Boolean));
+
+    const filteredSuccessful = allSuccessful.filter(m => {
+      const act = (m.action || '').trim().toLowerCase();
+      const cmd = (m.command || '').trim().toLowerCase();
+      if (failedActions.has(act)) return false;
+      if (cmd && failedCommands.has(cmd) && cmd !== '# manual command' && cmd !== '# executed command') return false;
+      return true;
+    });
+
+    filteredSuccessful.sort((a, b) => {
       const scoreA = a.empiricalScore ?? a.successScore ?? 0;
       const scoreB = b.empiricalScore ?? b.successScore ?? 0;
       if (scoreB !== scoreA) {
@@ -310,7 +321,7 @@ export class HindsightEngine {
     allFailed.sort((a, b) => b.timesFailed - a.timesFailed);
 
     return {
-      verifiedFixes: allSuccessful,
+      verifiedFixes: filteredSuccessful,
       redHerrings: allFailed
     };
   }
@@ -380,6 +391,11 @@ export class HindsightEngine {
         incident.successfulMitigations = incident.successfulMitigations || [];
         incident.successfulMitigations.push(newFix);
       }
+
+      // Remove from failedMitigations if present
+      incident.failedMitigations = (incident.failedMitigations || []).filter(f =>
+        (f.action || '').trim().toLowerCase() !== (details.actionTitle || actionItem?.action || '').trim().toLowerCase()
+      );
     } else if (outcome === 'failed') {
       const failedItem = (incident.failedMitigations || []).find(f => f.id === actionId);
       if (failedItem) {
@@ -390,8 +406,8 @@ export class HindsightEngine {
       } else {
         const newFailure: RedHerringAction = {
           id: actionId || `fail_${Date.now()}`,
-          action: details.actionTitle || "Attempted Triage Action",
-          command: details.command || "# executed command",
+          action: details.actionTitle || actionItem?.action || "Attempted Triage Action",
+          command: details.command || actionItem?.command || "# executed command",
           timesFailed: 1,
           timesAttempted: 1,
           failureRate: 1.0,
@@ -402,10 +418,15 @@ export class HindsightEngine {
         incident.failedMitigations.push(newFailure);
       }
 
-      if (actionItem) {
-        actionItem.timesAttempted = (actionItem.timesAttempted || actionItem.timesWorked) + 1;
-        actionItem.successScore = Math.round(((actionItem.timesWorked + 1) / (actionItem.timesAttempted + 2)) * 100) / 100;
-      }
+      // Crucial: permanently remove from successfulMitigations so it is never suggested as a fix again!
+      const resolvedAction = (actionItem ? actionItem.action : (details.actionTitle || '')).trim().toLowerCase();
+      const resolvedCmd = (actionItem ? actionItem.command : (details.command || '')).trim();
+
+      incident.successfulMitigations = (incident.successfulMitigations || []).filter(m =>
+        m.id !== actionId &&
+        (m.action || '').trim().toLowerCase() !== resolvedAction &&
+        (!resolvedCmd || resolvedCmd === '# executed command' || resolvedCmd === '# manual command' || (m.command || '').trim() !== resolvedCmd)
+      );
     }
 
     this.saveData();

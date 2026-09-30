@@ -226,23 +226,51 @@ export default function ChatbotIncidentAgent() {
     const { messageId, actionId, actionTitle } = failingAction;
     const reasonText = failureReason.trim() || 'Failed during triage attempt.';
 
-    // Update local message feedback state
+    // Find the message to get incident ID and command
+    const targetMsg = messages.find(m => m.id === messageId);
+    const incidentId = targetMsg?.searchResult?.primaryIncident?.id || allIncidents[0]?.id || '';
+    const failingFix = targetMsg?.searchResult?.rankedRecommendations?.verifiedFixes?.find(f => f.id === actionId);
+
+    // Update local message feedback state: remove from what to do, move to What NOT to Do!
     setMessages(prev =>
       prev.map(msg => {
         if (msg.id !== messageId) return msg;
+
+        const remainingFixes = (msg.searchResult?.rankedRecommendations?.verifiedFixes || []).filter(f => f.id !== actionId);
+        const newRedHerring: RedHerringAction = {
+          id: `fail_${Date.now()}`,
+          action: failingFix?.action || actionTitle,
+          command: failingFix?.command || '# avoided command',
+          dangerLevel: 'HIGH',
+          failureOutcome: reasonText,
+          timesFailed: 1,
+          timesAttempted: 1,
+          failureRate: 1.0
+        };
+
+        const existingRedHerrings = msg.searchResult?.rankedRecommendations?.redHerrings || [];
+        const updatedRedHerrings = [
+          ...existingRedHerrings.filter(rh => rh.action.trim().toLowerCase() !== (failingFix?.action || actionTitle).trim().toLowerCase()),
+          newRedHerring
+        ];
+
         return {
           ...msg,
           feedback: {
             ...(msg.feedback || {}),
             [actionId]: { status: 'failed', reason: reasonText }
-          }
+          },
+          searchResult: msg.searchResult ? {
+            ...msg.searchResult,
+            rankedRecommendations: {
+              ...msg.searchResult.rankedRecommendations,
+              verifiedFixes: remainingFixes,
+              redHerrings: updatedRedHerrings
+            }
+          } : undefined
         };
       })
     );
-
-    // Find the message to get incident ID
-    const targetMsg = messages.find(m => m.id === messageId);
-    const incidentId = targetMsg?.searchResult?.primaryIncident?.id || allIncidents[0]?.id || '';
 
     try {
       await fetch('/api/mitigations/feedback', {
@@ -254,6 +282,7 @@ export default function ChatbotIncidentAgent() {
           outcome: 'failed',
           notes: reasonText,
           actionTitle,
+          command: failingFix?.command,
           durationMinutes: 12.0
         })
       });
@@ -433,12 +462,17 @@ export default function ChatbotIncidentAgent() {
                         {msg.searchResult.isZeroDay ? (
                           <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
                             <Sparkles className="w-3 h-3" />
-                            NEW INCIDENT • AI HYPOTHESIS
+                            NEW INCIDENT • DYNAMIC LLM ANALYSIS
+                          </span>
+                        ) : msg.searchResult.isFurtherImprovement ? (
+                          <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1">
+                            <Sparkles className="w-3 h-3" />
+                            NEXT-STAGE OPTIMIZATIONS • GROUNDED IN PAST PROGRESS
                           </span>
                         ) : (
                           <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
                             <CheckCircle2 className="w-3 h-3" />
-                            HISTORICAL PRECEDENT MATCHED • {msg.searchResult.primaryConfidence || 100}% Experience
+                            ANSWERED DIRECTLY FROM MEMORY • {msg.searchResult.primaryConfidence || 100}% Experience
                           </span>
                         )}
                         <button
@@ -455,9 +489,9 @@ export default function ChatbotIncidentAgent() {
                       {msg.searchResult.primaryIncident.title}
                     </h2>
 
-                    <div className={`bg-slate-950/60 border-l-2 ${msg.searchResult.isZeroDay ? 'border-amber-400' : 'border-indigo-400'} p-2.5 rounded-r text-xs text-slate-300 leading-relaxed`}>
-                      <span className={`text-[10px] font-bold ${msg.searchResult.isZeroDay ? 'text-amber-400' : 'text-indigo-400'} uppercase tracking-wider block mb-0.5`}>
-                        {msg.searchResult.isZeroDay ? 'AI Diagnostic Hypothesis (Zero-Day)' : 'Historical Root Cause (Verified in Memory)'}
+                    <div className={`bg-slate-950/60 border-l-2 ${msg.searchResult.isZeroDay ? 'border-amber-400' : msg.searchResult.isFurtherImprovement ? 'border-purple-400' : 'border-indigo-400'} p-2.5 rounded-r text-xs text-slate-300 leading-relaxed`}>
+                      <span className={`text-[10px] font-bold ${msg.searchResult.isZeroDay ? 'text-amber-400' : msg.searchResult.isFurtherImprovement ? 'text-purple-400' : 'text-indigo-400'} uppercase tracking-wider block mb-0.5`}>
+                        {msg.searchResult.isZeroDay ? 'AI Diagnostic Hypothesis (New Incident)' : msg.searchResult.isFurtherImprovement ? 'Progress Grounded in Memory (Next Phase)' : 'Answered Directly From Memory (Past Experience)'}
                       </span>
                       {msg.searchResult.primaryIncident.rootCause}
                     </div>
@@ -483,15 +517,63 @@ export default function ChatbotIncidentAgent() {
                   </div>
                 )}
 
-                {/* Verified Mitigations with Feedback Buttons */}
+                {/* Previously Applied & Verified Fixes Card */}
+                {msg.searchResult.isFurtherImprovement && msg.searchResult.previouslyAppliedFixes && msg.searchResult.previouslyAppliedFixes.length > 0 && (
+                  <div className="bg-emerald-950/15 border border-emerald-500/30 rounded-xl p-3.5 flex flex-col gap-2">
+                    <div className="flex items-center justify-between text-xs font-semibold text-emerald-400">
+                      <span className="flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <span>Already Applied & Verified in Past Experience ({msg.searchResult.previouslyAppliedFixes.length})</span>
+                      </span>
+                      <span className="text-[10px] text-emerald-400/80 font-mono">
+                        Reinforced in Memory
+                      </span>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5 mt-0.5">
+                      {msg.searchResult.previouslyAppliedFixes.map((prevFix, pIdx) => (
+                        <div key={prevFix.id || pIdx} className="flex items-start justify-between gap-2 text-xs bg-slate-950/70 p-2.5 rounded-lg border border-emerald-500/20">
+                          <div className="flex items-start gap-2">
+                            <span className="text-emerald-400 font-mono font-bold mt-0.5">✓</span>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="font-medium text-slate-200">#{pIdx + 1} {prevFix.action}</span>
+                              <code className="text-[10px] text-sky-400 font-mono">{prevFix.command}</code>
+                            </div>
+                          </div>
+                          <span className="shrink-0 text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-semibold">
+                            Worked (100%)
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Verified / Proposed Mitigations with Feedback Buttons */}
                 <div className="flex flex-col gap-2.5">
-                  <div className={`flex items-center justify-between text-xs font-semibold ${msg.searchResult.isZeroDay ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  <div className={`flex items-center justify-between text-xs font-semibold ${msg.searchResult.isZeroDay ? 'text-indigo-400' : msg.searchResult.isFurtherImprovement ? 'text-purple-400' : 'text-emerald-400'}`}>
                     <span className="flex items-center gap-1.5">
-                      {msg.searchResult.isZeroDay ? <Lightbulb className="w-4 h-4 text-amber-400" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
-                      <span>{msg.searchResult.isZeroDay ? 'Proposed Solutions to Try (Click "Worked" on what solves it)' : 'Verified Fixes (Empirically Proven in Memory)'}</span>
+                      {msg.searchResult.isZeroDay ? (
+                        <Lightbulb className="w-4 h-4 text-amber-400" />
+                      ) : msg.searchResult.isFurtherImprovement ? (
+                        <Sparkles className="w-4 h-4 text-purple-400" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      )}
+                      <span>
+                        {msg.searchResult.isZeroDay
+                          ? 'Proposed Resolution Steps'
+                          : msg.searchResult.isFurtherImprovement
+                          ? 'Proposed Next-Stage Optimizations'
+                          : 'Verified Fixes (Empirically Proven in Memory)'}
+                      </span>
                     </span>
                     <span className="text-[10px] text-slate-400 font-mono font-normal">
-                      {msg.searchResult.isZeroDay ? 'Click feedback or reply in chat' : 'Grounded in past resolved outages'}
+                      {msg.searchResult.isZeroDay
+                        ? 'Test steps and click "Worked" on success'
+                        : msg.searchResult.isFurtherImprovement
+                        ? 'Test next-stage steps and click "Worked" to reinforce'
+                        : 'Grounded in past resolved outages'}
                     </span>
                   </div>
 
@@ -508,15 +590,11 @@ export default function ChatbotIncidentAgent() {
                       >
                         <div className="flex items-center justify-between text-xs">
                           <span className="font-bold text-white">#{idx + 1} {fix.action}</span>
-                          {msg.searchResult?.isZeroDay || (fix.timesWorked || 0) === 0 ? (
-                            <span className="font-mono text-[11px] text-amber-400">
-                              Trial / Proposed
+                          {!msg.searchResult?.isZeroDay && !msg.searchResult?.isFurtherImprovement && fix.successScore !== undefined && (fix.timesWorked || 0) > 0 ? (
+                            <span className="font-mono text-[11px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                              {successPct}% success ({fix.timesWorked} prior {fix.timesWorked === 1 ? 'fix' : 'fixes'})
                             </span>
-                          ) : (
-                            <span className="font-mono text-[11px] text-emerald-400">
-                              {successPct}% success ({fix.timesWorked || 1} prior {fix.timesWorked === 1 ? 'fix' : 'fixes'})
-                            </span>
-                          )}
+                          ) : null}
                         </div>
 
                         {/* Command Code Box */}
@@ -602,12 +680,12 @@ export default function ChatbotIncidentAgent() {
                   })}
                 </div>
 
-                {/* Tracked Anti-Patterns / Pitfalls */}
-                {msg.searchResult.rankedRecommendations.redHerrings.length > 0 && (
+                {/* Tracked Anti-Patterns / Pitfalls - Shown whenever failure history exists */}
+                {msg.searchResult.rankedRecommendations.redHerrings && msg.searchResult.rankedRecommendations.redHerrings.length > 0 && (
                   <div className="flex flex-col gap-2 pt-2 border-t border-slate-800">
                     <span className="text-xs font-semibold text-rose-400 flex items-center gap-1.5">
                       <XCircle className="w-4 h-4" />
-                      <span>Dangerous Pitfalls (Proven to fail in past incidents)</span>
+                      <span>What NOT to Do (Proven to fail in past experience with this incident)</span>
                     </span>
 
                     {msg.searchResult.rankedRecommendations.redHerrings.map(rh => (

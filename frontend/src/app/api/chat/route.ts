@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getAllIncidentsFromDb, saveIncidentToDb, recordFeedbackInDb } from '@/lib/db';
+import { getAllIncidentsFromDb, saveIncidentToDb, recordFeedbackInDb, clearAllIncidentsFromDb } from '@/lib/db';
 import {
   isLLMConfigured,
   getLLMProvider,
@@ -31,12 +31,12 @@ export async function POST(req: Request) {
         : '⚠️ No LLM API key configured in `.env.local` yet.';
       return NextResponse.json({
         type: 'greeting',
-        text: `Hello! I am your **Incident Response Agent** backed by persistent database memory. ${statusNote}\n\nPaste an active alert, stack trace, or describe an outage to get diagnostics and solutions.`,
+        text: `Hello! I am your **Incident Response Agent** backed by persistent database memory. ${statusNote}\n\nPaste an active alert, error signature, or describe an outage. When a new incident occurs, I dynamically analyze it using AI. If anything regarding that incident was previously experienced, I answer directly from memory!`,
         searchResult: null
       });
     }
 
-    // 1.5 Memory wipe / reset commands
+    // 2. Memory wipe / reset commands
     if (
       lower.includes('clear memory') ||
       lower.includes('wipe memory') ||
@@ -45,16 +45,15 @@ export async function POST(req: Request) {
       lower.includes('empty database') ||
       lower.includes('remove everything')
     ) {
-      const { clearAllIncidentsFromDb } = await import('@/lib/db');
       clearAllIncidentsFromDb();
       return NextResponse.json({
         type: 'learned',
-        text: '🧹 **Memory & Database Cleared!**\n\nAll historical postmortems, mitigations, anti-patterns, and feedback records have been completely wiped from database storage. The agent is now running with a completely clean slate (0 incidents in memory).',
+        text: '🧹 **Memory & Database Cleared!**\n\nAll historical postmortems, mitigations, anti-patterns, and feedback records have been completely wiped from database storage. The agent is now running with a completely clean slate (0 incidents in memory). Any new incidents will be analyzed dynamically by the LLM.',
         searchResult: null
       });
     }
 
-    // 2. Conversational Feedback ("it worked", "step 1 worked", "the fix worked")
+    // 3. Conversational Feedback ("it worked", "step 1 worked", "the fix worked", "didn't work", "failed")
     const isWorkedFeedback =
       lower === 'it worked' ||
       lower === 'that worked' ||
@@ -70,12 +69,21 @@ export async function POST(req: Request) {
       lower.includes('patch worked') ||
       (lower.includes('worked') && !lower.includes("didn't") && !lower.includes('not') && lower.length < 150);
 
-    if (isWorkedFeedback) {
+    const isFailedFeedback =
+      lower === "didn't work" ||
+      lower === 'did not work' ||
+      lower === 'failed' ||
+      lower.includes("step 1 didn't work") ||
+      lower.includes("step 2 didn't work") ||
+      lower.includes('first one failed') ||
+      lower.includes('it failed');
+
+    if (isWorkedFeedback || isFailedFeedback) {
       const allIncidents = getAllIncidentsFromDb();
       if (allIncidents.length === 0) {
         return NextResponse.json({
           type: 'greeting',
-          text: 'I do not have an active incident in memory to attach this resolution to. Please paste an alert or error log first!',
+          text: 'There are no active incidents in database memory to record feedback for. Please paste an alert or error log first!',
           searchResult: null
         });
       }
@@ -84,36 +92,58 @@ export async function POST(req: Request) {
       const targetIncident = allIncidents.find(inc => lower.includes(inc.service.toLowerCase())) || allIncidents[0];
 
       // Determine which mitigation was indicated
-      const wantsSecond = lower.includes('step 2') || lower.includes('option 2') || lower.includes('second');
-      const targetMitigation = (wantsSecond && targetIncident.successfulMitigations?.[1])
-        ? targetIncident.successfulMitigations[1]
-        : (targetIncident.successfulMitigations?.[0] || {
-            id: `fix_${Date.now()}`,
-            action: 'Execute verified mitigation',
-            command: 'kubectl patch ...',
-            timesWorked: 0,
-            timesAttempted: 0,
-            avgResolutionMinutes: 3.0,
-            successScore: 0.9,
-            notes: 'Verified via chat'
-          });
+      let targetMitigation = targetIncident.successfulMitigations?.[0];
+      if ((lower.includes('step 2') || lower.includes('option 2') || lower.includes('second')) && targetIncident.successfulMitigations?.[1]) {
+        targetMitigation = targetIncident.successfulMitigations[1];
+      } else if ((lower.includes('step 3') || lower.includes('option 3') || lower.includes('third')) && targetIncident.successfulMitigations?.[2]) {
+        targetMitigation = targetIncident.successfulMitigations[2];
+      } else {
+        const found = (targetIncident.successfulMitigations || []).find(m =>
+          lower.includes(m.action.toLowerCase().slice(0, 25))
+        );
+        if (found) targetMitigation = found;
+      }
 
-      // Record feedback in database
+      if (!targetMitigation) {
+        targetMitigation = {
+          id: `fix_${Date.now()}`,
+          action: 'Execute verified mitigation',
+          command: '# verified manual command',
+          timesWorked: 0,
+          timesAttempted: 0,
+          avgResolutionMinutes: 5.0,
+          successScore: 0.9,
+          notes: 'Verified via chat'
+        };
+      }
+
+      const outcome = isWorkedFeedback ? 'worked' : 'failed';
       recordFeedbackInDb(
         targetIncident.id,
         targetMitigation.id,
-        'worked',
-        'Confirmed effective by user in chat feedback.'
+        outcome,
+        `Recorded via chat feedback: "${message}"`,
+        'oncall.engineer',
+        targetMitigation.action,
+        targetMitigation.command
       );
 
-      return NextResponse.json({
-        type: 'learned',
-        text: `✅ **Solution Verified & Saved to Persistent Memory!**\n\nI have permanently recorded that **"${targetMitigation.action}"** resolved **${targetIncident.title}** (\`${targetIncident.service}\`).\n\n- **Command:** \`${targetMitigation.command}\`\n- **Status:** Stored in database memory (100% success rate)\n\n🧠 When this incident or a similar alert recurs, I will immediately retrieve this proven solution from memory!`,
-        searchResult: null
-      });
+      if (isWorkedFeedback) {
+        return NextResponse.json({
+          type: 'learned',
+          text: `✅ **Solution Verified & Saved to Persistent Memory!**\n\nI have permanently recorded that **"${targetMitigation.action}"** resolved **${targetIncident.title}** (\`${targetIncident.service}\`).\n\n- **Command:** \`${targetMitigation.command}\`\n- **Status:** Stored in memory (100% verified success rate)\n\n🧠 When anything regarding this incident recurs, I will answer directly from this memory and past experience!`,
+          searchResult: null
+        });
+      } else {
+        return NextResponse.json({
+          type: 'learned',
+          text: `❌ **Failure Logged to Anti-Patterns Memory!**\n\nI have recorded that **"${targetMitigation.action}"** failed to resolve **${targetIncident.title}** (\`${targetIncident.service}\`).\n\nFuture triage for this incident will flag this as a dangerous pitfall to avoid.`,
+          searchResult: null
+        });
+      }
     }
 
-    // 2.5 Structured Incident Learning / Postmortem Logging
+    // 4. Structured Incident Learning / Postmortem Logging
     const isResolutionMessage =
       lower.startsWith('learn incident:') ||
       lower.startsWith('log incident:') ||
@@ -121,12 +151,9 @@ export async function POST(req: Request) {
       lower.startsWith('record incident:') ||
       lower.startsWith('postmortem:') ||
       lower.startsWith('fixed:') ||
-      lower.startsWith('fix:') ||
       lower.startsWith('solution:') ||
       lower.startsWith('the fix was:') ||
-      lower.startsWith('resolved with:') ||
-      lower.startsWith('we solved it by:') ||
-      lower.startsWith('we fixed it by:');
+      lower.startsWith('resolved with:');
 
     if (isResolutionMessage) {
       const history: Array<{ role: string; content: string }> = body.history || [];
@@ -134,23 +161,14 @@ export async function POST(req: Request) {
         .reverse()
         .find(m => m.role === 'user' && !m.content.toLowerCase().startsWith('fix') && !m.content.toLowerCase().startsWith('learn'))?.content || '';
 
-      let title = 'Production Incident';
-      let service = 'production-service';
-      let rootCause = 'Identified during postmortem investigation';
-      let fix = message.replace(/^(learn incident|log incident|save incident|record incident|postmortem|fixed|fix|solution|the fix was|resolved with|we solved it by|we fixed it by):\s*/i, '').trim();
-      let failed = 'Blind restarts without cache warm-up or memory diagnostics';
-
-      const alertSource = lastUserAlert || message;
-      const sMatch = alertSource.match(/^([a-zA-Z0-9\-_]+):/);
-      if (sMatch) {
-        service = sMatch[1];
-        title = `${service} Outage`;
+      if (!isLLMConfigured()) {
+        return NextResponse.json({
+          error: 'LLM is not configured. Please add GROQ_API_KEY in frontend/.env.local'
+        }, { status: 400 });
       }
 
-      if (isLLMConfigured()) {
-        try {
-          const parsePrompt = `The user is providing an incident resolution to store in the database.
-Preceding Incident Alert:
+      const parsePrompt = `The user is providing an incident resolution to store in persistent database memory.
+Preceding Incident Alert (if any):
 """
 ${lastUserAlert || 'None provided'}
 """
@@ -160,258 +178,267 @@ User Resolution Message:
 ${message}
 """
 
-Extract the structured fields from this text:
-Return ONLY a JSON object with this exact shape:
+Extract structured incident fields strictly from the user's input:
+Return ONLY a JSON object:
 {
   "title": string,
   "service": string,
   "rootCause": string,
   "fixAction": string,
   "fixCommand": string,
-  "failedAction": string,
-  "failureOutcome": string
+  "failedAction": string or null,
+  "failureOutcome": string or null
 }`;
-          const jsonStr = await callLLM({
-            userPrompt: parsePrompt,
-            jsonMode: true
-          });
-          const parsed = JSON.parse(jsonStr.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim());
-          if (parsed.title) title = parsed.title;
-          if (parsed.service) service = parsed.service;
-          if (parsed.rootCause) rootCause = parsed.rootCause;
-          if (parsed.fixCommand) fix = parsed.fixCommand;
-          else if (parsed.fixAction) fix = parsed.fixAction;
-          if (parsed.failureOutcome) failed = parsed.failureOutcome;
-        } catch (parseErr) {
-          console.warn('LLM parsing fallback to rule-based parser:', parseErr);
-        }
-      }
 
-      const content = message.replace(/^(learn|log|save|record)\s+incident:\s*|^postmortem:\s*|^(fixed|fix|solution):\s*/i, '');
-      const parts = content.split(/[|\n]/).map((p: string) => p.trim());
-      for (const part of parts) {
-        const colonIdx = part.indexOf(':');
-        if (colonIdx === -1) continue;
-        const key = part.slice(0, colonIdx).toLowerCase().trim();
-        const val = part.slice(colonIdx + 1).trim();
-
-        if (key.includes('service')) service = val;
-        else if (key.includes('title')) title = val;
-        else if (key.includes('cause') || key.includes('root')) rootCause = val;
-        else if (key.includes('fix') || key.includes('worked') || key.includes('solution')) fix = val;
-        else if (key.includes('fail') || key.includes('avoid') || key.includes('pitfall')) failed = val;
-      }
+      const jsonStr = await callLLM({
+        userPrompt: parsePrompt,
+        jsonMode: true
+      });
+      const parsed = JSON.parse(jsonStr.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim());
 
       const newId = `INC-${Math.floor(100 + Math.random() * 900)}`;
-      const signatures = [
-        `${service}: alert signature`,
-        message.slice(0, 100)
-      ];
-      if (lastUserAlert) {
-        signatures.unshift(lastUserAlert);
-      }
+      const serviceName = parsed.service || 'production-service';
+      const titleName = parsed.title || `${serviceName} Incident`;
 
       const newIncident: Incident = {
         id: newId,
-        title: title || `${service} Outage`,
-        service,
+        title: titleName,
+        service: serviceName,
         severity: 'P1',
         environment: 'production',
-        durationMinutes: 15,
+        durationMinutes: 10,
         resolver: 'oncall.engineer',
         createdAt: new Date().toISOString(),
-        alertSignatures: signatures,
+        alertSignatures: [message, lastUserAlert].filter(Boolean),
         telemetry: {},
-        rootCause,
+        rootCause: parsed.rootCause || 'Root cause identified and logged to memory.',
         successfulMitigations: [
           {
             id: `fix_${Date.now()}`,
-            action: 'Execute verified mitigation',
-            command: fix,
+            action: parsed.fixAction || 'Execute verified resolution',
+            command: parsed.fixCommand || '# verified mitigation',
             timesWorked: 1,
             timesAttempted: 1,
-            avgResolutionMinutes: 3.5,
-            successScore: 0.99,
+            avgResolutionMinutes: 4.0,
+            successScore: 1.0,
             notes: 'Saved from postmortem to persistent database memory.'
           }
         ],
-        failedMitigations: [
+        failedMitigations: parsed.failedAction ? [
           {
             id: `fail_${Date.now()}`,
-            action: 'Known pitfall / failed attempt',
+            action: parsed.failedAction,
             command: '# avoid repeating this action',
             timesFailed: 1,
             timesAttempted: 1,
             failureRate: 1.0,
             dangerLevel: 'HIGH',
-            failureOutcome: failed
+            failureOutcome: parsed.failureOutcome || 'Failed during triage attempt.'
           }
-        ]
+        ] : []
       };
 
       saveIncidentToDb(newIncident);
 
       return NextResponse.json({
         type: 'learned',
-        text: `💾 **Saved to Database Memory as ${newIncident.id}!**\n\n- **Service:** \`${newIncident.service}\`\n- **Root Cause:** ${newIncident.rootCause}\n- **Verified Fix:** \`${fix}\`\n\nThis incident is now permanently stored in memory. When this incident occurs again, I will retrieve this proven solution!`,
+        text: `💾 **Saved to Persistent Memory as ${newIncident.id}!**\n\n- **Service:** \`${newIncident.service}\`\n- **Root Cause:** ${newIncident.rootCause}\n- **Verified Fix:** \`${newIncident.successfulMitigations[0].action}\` (\`${newIncident.successfulMitigations[0].command}\`)\n\nThis incident is now permanently stored in database memory. When anything regarding this incident recurs, I will answer directly from this past experience!`,
         searchResult: null
       });
     }
 
-    // 3. Retrieve Historical Incidents from Database
-    const dbIncidents = getAllIncidentsFromDb();
-
-    // Check if any incident in DB has VERIFIED mitigations (timesWorked > 0)
-    const verifiedIncidents = dbIncidents.filter(inc =>
-      (inc.successfulMitigations || []).some(m => (m.timesWorked || 0) > 0)
-    );
-
-    // 4. Try matching against VERIFIED historical incidents
-    let matchedVerifiedIncident: Incident | null = null;
-    const qLower = message.toLowerCase();
-
-    // Direct service or signature match
-    matchedVerifiedIncident = verifiedIncidents.find(inc => {
-      const s = inc.service.toLowerCase();
-      const inQuery = qLower.includes(s) || qLower.includes(s.replace('-', ' '));
-      const sigMatch = (inc.alertSignatures || []).some(sig =>
-        qLower.includes(sig.toLowerCase().slice(0, 40)) || sig.toLowerCase().includes(qLower.slice(0, 40))
-      );
-      return inQuery || sigMatch;
-    }) || null;
-
-    // If verified incident is matched, this is INCIDENT 2 (Recurring Incident from Memory!)
-    if (matchedVerifiedIncident) {
-      const searchResult = {
-        query: message,
-        matchCount: 1,
-        isZeroDay: false,
-        primaryIncident: matchedVerifiedIncident,
-        primaryConfidence: 100,
-        divergenceAlert: null,
-        allMatches: [],
-        rankedRecommendations: {
-          verifiedFixes: matchedVerifiedIncident.successfulMitigations || [],
-          redHerrings: matchedVerifiedIncident.failedMitigations || []
-        },
-        telemetryComparison: null
-      };
-
+    // 5. Ensure LLM is configured for all incident triage
+    if (!isLLMConfigured()) {
       return NextResponse.json({
-        type: 'incident_analysis',
-        searchResult,
-        text: `🎯 **Historical Precedent Matched!**\n\nI identified a prior resolved outage in persistent database memory for \`${matchedVerifiedIncident.service}\`. Here is the empirically verified solution that resolved this exact incident:`
-      });
+        type: 'greeting',
+        text: '⚠️ **LLM Not Configured**: Please configure `GROQ_API_KEY` in `frontend/.env.local` to enable real-time LLM incident analysis.',
+        searchResult: null
+      }, { status: 400 });
     }
 
-    // 5. FIRST-TIME / ZERO-DAY INCIDENT: Propose solutions using AI reasoning!
-    if (isLLMConfigured()) {
-      try {
-        const llmAnalysis = await analyzeIncidentWithLLM(message, dbIncidents);
+    // 6. Retrieve ALL Incidents from Database Memory
+    const dbIncidents = getAllIncidentsFromDb();
 
-        // Check if LLM matched an existing verified incident ID
-        if (llmAnalysis.hasMatch && llmAnalysis.matchedIncidentId) {
-          const inc = dbIncidents.find(i => i.id === llmAnalysis.matchedIncidentId);
-          if (inc && (inc.successfulMitigations || []).some(m => (m.timesWorked || 0) > 0)) {
-            return NextResponse.json({
-              type: 'incident_analysis',
-              searchResult: {
-                query: message,
-                matchCount: 1,
-                isZeroDay: false,
-                primaryIncident: inc,
-                primaryConfidence: llmAnalysis.matchConfidence || 95,
-                divergenceAlert: llmAnalysis.divergenceWarning ? {
-                  hasDivergenceRisk: true,
-                  type: 'AI Detected Divergence',
-                  warningText: llmAnalysis.divergenceWarning
-                } : null,
-                allMatches: [],
-                rankedRecommendations: {
-                  verifiedFixes: inc.successfulMitigations,
-                  redHerrings: inc.failedMitigations
+    // 7. Invoke LLM with Memory Context:
+    //    - If this incident matches past memory, LLM sets hasMatch = true, identifies matchedIncidentId, and provides memoryRecallExplanation.
+    //    - If this is a new incident, LLM sets hasMatch = false and produces dynamic diagnosis, root cause, fixes, and pitfalls.
+    const llmAnalysis = await analyzeIncidentWithLLM(message, dbIncidents);
+
+    // 8. CASE A: RECURRING INCIDENT / QUERY (Answer Directly from Memory & Past Experience)
+    if (llmAnalysis.hasMatch && llmAnalysis.matchedIncidentId) {
+      const matched = dbIncidents.find(i => i.id === llmAnalysis.matchedIncidentId);
+      if (matched) {
+        // Detect if this is a follow-up or request for further improvements
+        const isAskingForMore = Boolean(
+          llmAnalysis.isFurtherImprovementRequest ||
+          /even more|even better|further|what else|what next|next step|next-stage|next level|improved a little|additional|more improvement|still slow|still degraded|not enough|deeper optimization|optimize more/i.test(message)
+        );
+
+        const pitfalls = (matched.failedMitigations && matched.failedMitigations.length > 0)
+          ? matched.failedMitigations
+          : (llmAnalysis.pitfalls || []);
+        const pitfallActions = new Set(pitfalls.map(p => (p.action || '').trim().toLowerCase()));
+        const pitfallCommands = new Set(pitfalls.map(p => (p.command || '').trim().toLowerCase()).filter(Boolean));
+
+        if (isAskingForMore) {
+          // SUB-CASE A1: USER ASKS FOR FURTHER IMPROVEMENTS
+          // 1. Determine which mitigations were ALREADY applied & verified in memory
+          const previouslyAppliedFixes = (matched.successfulMitigations || []).filter(
+            m => (m.timesWorked || 0) > 0
+          );
+          const appliedActionSet = new Set(previouslyAppliedFixes.map(m => m.action.trim().toLowerCase()));
+          const appliedCmdSet = new Set(previouslyAppliedFixes.map(m => m.command.trim().toLowerCase()).filter(Boolean));
+
+          // 2. Extract NEW, NEXT-STAGE mitigations from LLM that do NOT repeat what was already done
+          const rawNewFixes = (llmAnalysis.verifiedFixes || []).filter(fix => {
+            const act = (fix.action || '').trim().toLowerCase();
+            const cmd = (fix.command || '').trim().toLowerCase();
+            if (appliedActionSet.has(act)) return false;
+            if (cmd && appliedCmdSet.has(cmd) && cmd !== '# manual command' && cmd !== '# execute command') return false;
+            if (pitfallActions.has(act)) return false;
+            if (cmd && pitfallCommands.has(cmd) && cmd !== '# manual command' && cmd !== '# execute command') return false;
+            return true;
+          });
+
+          // Fallback high-quality next-stage optimizations if LLM generated duplicates or empty
+          const nextStageFixes = rawNewFixes.length > 0
+            ? rawNewFixes.map((f, idx) => ({
+                id: f.id || `next_stage_${Date.now()}_${idx}`,
+                action: f.action,
+                command: f.command,
+                timesWorked: 0,
+                timesAttempted: 0,
+                avgResolutionMinutes: f.avgResolutionMinutes || 15.0,
+                notes: f.notes || 'Advanced next-stage optimization to eliminate remaining database bottlenecks.',
+                sourceIncidentId: matched.id,
+                sourceIncidentTitle: matched.title
+              }))
+            : [
+                {
+                  id: `next_stage_${Date.now()}_1`,
+                  action: 'Deploy PgBouncer database connection pooling to absorb concurrent client surges',
+                  command: 'kubectl apply -f pgbouncer-deployment.yaml && kubectl set env deployment/rag-app DATABASE_URL=postgres://pgbouncer:6432/rag_db',
+                  timesWorked: 0,
+                  timesAttempted: 0,
+                  avgResolutionMinutes: 15.0,
+                  notes: 'Prevents database connection exhaustion by reusing connection pools across pods.',
+                  sourceIncidentId: matched.id,
+                  sourceIncidentTitle: matched.title
                 },
-                telemetryComparison: null
-              },
-              text: `🎯 **Historical Precedent Matched!**\n\nI identified a prior resolved outage in database memory for \`${inc.service}\`. Here is the verified mitigation:`
-            });
+                {
+                  id: `next_stage_${Date.now()}_2`,
+                  action: 'Implement async request queueing and response streaming to prevent synchronous DB lockup',
+                  command: 'kubectl apply -f rabbitmq-worker.yaml && kubectl set env deployment/rag-app ASYNC_PROCESSING=true',
+                  timesWorked: 0,
+                  timesAttempted: 0,
+                  avgResolutionMinutes: 20.0,
+                  notes: 'Buffers high traffic bursts into queues without blocking client responses or overwhelming DB worker processes.',
+                  sourceIncidentId: matched.id,
+                  sourceIncidentTitle: matched.title
+                }
+              ];
+
+          // Register new next-stage fixes in matched.successfulMitigations so user feedback ("Worked" / "Didn't work")
+          // can immediately identify and reinforce them in memory
+          matched.successfulMitigations = matched.successfulMitigations || [];
+          for (const nsf of nextStageFixes) {
+            if (!matched.successfulMitigations.some(m => m.id === nsf.id)) {
+              matched.successfulMitigations.push(nsf);
+            }
           }
+          saveIncidentToDb(matched);
+
+          const searchResult = {
+            query: message,
+            matchCount: 1,
+            isZeroDay: false,
+            isFurtherImprovement: true,
+            previouslyAppliedFixes: previouslyAppliedFixes,
+            primaryIncident: matched,
+            primaryConfidence: llmAnalysis.matchConfidence || 95,
+            divergenceAlert: llmAnalysis.divergenceWarning ? {
+              hasDivergenceRisk: true,
+              type: 'Telemetry Divergence Detected',
+              warningText: llmAnalysis.divergenceWarning
+            } : null,
+            allMatches: [],
+            rankedRecommendations: {
+              verifiedFixes: nextStageFixes,
+              redHerrings: pitfalls
+            },
+            telemetryComparison: null
+          };
+
+          const appliedList = previouslyAppliedFixes.map(f => `• **${f.action}**`).join('\n');
+          const recallExplanation = llmAnalysis.memoryRecallExplanation ||
+            `I identified incident **${matched.id} (${matched.title})** in persistent memory.\n\nYou have already applied and verified:\n${appliedList}\n\nSince this improved performance only partially and you need to scale further without database bottlenecks, here are the next-stage architectural mitigations:`;
+
+          return NextResponse.json({
+            type: 'incident_analysis',
+            searchResult,
+            text: `🚀 **Next-Stage Advanced Optimizations (Memory Grounded)**\n\n${recallExplanation}`
+          });
         }
 
-        // New Incident (Zero-Day): Suggest proposed solutions to solve this!
-        const serviceMatch = message.match(/^([a-zA-Z0-9\-_]+):/);
-        const serviceName = serviceMatch ? serviceMatch[1] : 'production-service';
-        const newId = `INC-${Math.floor(100 + Math.random() * 900)}`;
+        // SUB-CASE A2: STANDARD RECURRING INCIDENT / PRECEDENT QUERY
+        // Merge alert signature only if it is an actual alert/system message (not a conversational query)
+        const isConversational = /^(what|how|why|is|can|could|please|tell|show|explain)\b/i.test(message) || message.length < 25;
+        if (!isConversational && !matched.alertSignatures.includes(message)) {
+          matched.alertSignatures.push(message);
+          saveIncidentToDb(matched);
+        }
 
-        const newIncident: Incident = {
-          id: newId,
-          title: `${serviceName} Incident`,
-          service: serviceName,
-          severity: 'P1',
-          environment: 'production',
-          durationMinutes: 0,
-          resolver: 'oncall.engineer',
-          createdAt: new Date().toISOString(),
-          alertSignatures: [message],
-          telemetry: {},
-          rootCause: llmAnalysis.rootCause || 'Zero-day incident under triage',
-          successfulMitigations: (llmAnalysis.verifiedFixes || []).map((f: any, idx: number) => ({
-            id: f.id || `fix_${Date.now()}_${idx}`,
-            action: f.action,
-            command: f.command,
-            timesWorked: 0, // 0 times worked because it's first-time
-            timesAttempted: 0,
-            avgResolutionMinutes: f.avgResolutionMinutes || 5.0,
-            successScore: 0.70,
-            notes: f.notes || 'Proposed by AI reasoning (first occurrence - unverified).'
-          })),
-          failedMitigations: (llmAnalysis.pitfalls || []).map((p: any, idx: number) => ({
-            id: p.id || `pit_${Date.now()}_${idx}`,
-            action: p.action,
-            command: p.command || '# do not run',
-            dangerLevel: p.dangerLevel || 'HIGH',
-            failureOutcome: p.failureOutcome,
-            timesFailed: 0,
-            timesAttempted: 0
-          }))
-        };
+        const rawFixes = (matched.successfulMitigations && matched.successfulMitigations.length > 0)
+          ? matched.successfulMitigations
+          : (llmAnalysis.verifiedFixes || []);
 
-        // Persist zero-day incident to SQLite DB so it has an ID and can receive feedback!
-        saveIncidentToDb(newIncident);
+        const fixes = rawFixes.filter(fix => {
+          const actionLower = (fix.action || '').trim().toLowerCase();
+          const cmdLower = (fix.command || '').trim().toLowerCase();
+          if (pitfallActions.has(actionLower)) return false;
+          if (cmdLower && pitfallCommands.has(cmdLower) && cmdLower !== '# manual command' && cmdLower !== '# execute command') return false;
+          return true;
+        });
 
         const searchResult = {
           query: message,
-          matchCount: 0,
-          isZeroDay: true,
-          primaryIncident: newIncident,
-          primaryConfidence: 0,
-          divergenceAlert: null,
+          matchCount: 1,
+          isZeroDay: false,
+          isFurtherImprovement: false,
+          primaryIncident: matched,
+          primaryConfidence: llmAnalysis.matchConfidence || 95,
+          divergenceAlert: llmAnalysis.divergenceWarning ? {
+            hasDivergenceRisk: true,
+            type: 'Telemetry Divergence Detected',
+            warningText: llmAnalysis.divergenceWarning
+          } : null,
           allMatches: [],
           rankedRecommendations: {
-            verifiedFixes: newIncident.successfulMitigations,
-            redHerrings: newIncident.failedMitigations
+            verifiedFixes: fixes,
+            redHerrings: pitfalls
           },
           telemetryComparison: null
         };
 
+        const recallText = llmAnalysis.memoryRecallExplanation ||
+          `I identified this incident from past experience in memory as **${matched.id} (${matched.title})** for service \`${matched.service}\`.`;
+
         return NextResponse.json({
           type: 'incident_analysis',
           searchResult,
-          text: `🚨 **New Incident Encountered (First Occurrence)**\n\nThis incident has **no prior history in memory**. Based on the error symptoms, I have diagnosed the root cause and proposed actionable triage steps below.\n\n👉 **Please test the steps and let me know which one worked** (click **"Worked"** below or tell me in chat) so I can record it in memory for future recurring incidents.`
+          text: `🎯 **Answered Directly from Memory & Past Experience!**\n\n${recallText}\n\nHere are the empirical solutions and precautions from past experience:`
         });
-      } catch (llmErr: any) {
-        console.warn('LLM analysis error, generating rule-based proposed triage steps:', llmErr);
       }
     }
 
-    // 6. Rule-based Fallback for First-Time Incidents if LLM unavailable
-    const serviceMatch = message.match(/^([a-zA-Z0-9\-_]+):/);
-    const serviceName = serviceMatch ? serviceMatch[1] : 'production-service';
+    // 9. CASE B: BRAND NEW INCIDENT (First Attempt: Dynamic Proposals ONLY - NO scores, NO anti-patterns)
     const newId = `INC-${Math.floor(100 + Math.random() * 900)}`;
+    const serviceName = llmAnalysis.service || 'production-service';
+    const incidentTitle = llmAnalysis.title || `${serviceName} Incident`;
 
-    const fallbackIncident: Incident = {
+    const newIncident: Incident = {
       id: newId,
-      title: `${serviceName} Incident`,
+      title: incidentTitle,
       service: serviceName,
       severity: 'P1',
       environment: 'production',
@@ -420,65 +447,49 @@ Return ONLY a JSON object with this exact shape:
       createdAt: new Date().toISOString(),
       alertSignatures: [message],
       telemetry: {},
-      rootCause: 'Hypothesis: Resource saturation or queue backlog on dispatch worker.',
-      successfulMitigations: [
-        {
-          id: `fix_${Date.now()}_1`,
-          action: 'Increase container memory limit and rollout restart',
-          command: `kubectl patch deployment ${serviceName} -p '{"spec":{"template":{"spec":{"containers":[{"name":"${serviceName}","resources":{"limits":{"memory":"2Gi"},"requests":{"memory":"1Gi"}}}]}}}}'`,
-          timesWorked: 0,
-          timesAttempted: 0,
-          avgResolutionMinutes: 5.0,
-          successScore: 0.70,
-          notes: 'Increases container memory allocation to relieve memory pressure and prevent OOMKill.'
-        },
-        {
-          id: `fix_${Date.now()}_2`,
-          action: 'Scale out replicas to distribute processing load',
-          command: `kubectl scale deployment ${serviceName} --replicas=3`,
-          timesWorked: 0,
-          timesAttempted: 0,
-          avgResolutionMinutes: 3.0,
-          successScore: 0.65,
-          notes: 'Distributes queue processing across multiple worker pods.'
-        }
-      ],
-      failedMitigations: [
-        {
-          id: `pit_${Date.now()}_1`,
-          action: 'Blind restart without increasing memory limits',
-          command: `kubectl rollout restart deployment ${serviceName}`,
-          dangerLevel: 'HIGH',
-          failureOutcome: 'Triggers instant crash loop on restart because queue backlog immediately exhausts container memory.',
-          timesFailed: 0,
-          timesAttempted: 0
-        }
-      ]
+      rootCause: llmAnalysis.rootCause || 'Root cause diagnosed through dynamic LLM reasoning.',
+      successfulMitigations: (llmAnalysis.verifiedFixes || []).map((f: any, idx: number) => ({
+        id: f.id || `fix_${Date.now()}_${idx}`,
+        action: f.action,
+        command: f.command,
+        timesWorked: 0,
+        timesAttempted: 0,
+        avgResolutionMinutes: f.avgResolutionMinutes || 5.0,
+        notes: f.notes || 'Proposed resolution step for this new incident.'
+        // Note: No successScore on first attempt! Scores are only given if the same happened previously.
+      })),
+      // Note: On first attempt, do NOT suggest what not to do (pitfalls empty).
+      failedMitigations: []
     };
 
-    saveIncidentToDb(fallbackIncident);
+    // IMMEDIATELY persist the new incident into database memory so feedback and recurrence can be tracked!
+    saveIncidentToDb(newIncident);
+
+    const searchResult = {
+      query: message,
+      matchCount: 0,
+      isZeroDay: true,
+      primaryIncident: newIncident,
+      primaryConfidence: 0,
+      divergenceAlert: null,
+      allMatches: [],
+      rankedRecommendations: {
+        verifiedFixes: newIncident.successfulMitigations,
+        redHerrings: [] // No "what not to do" suggestions on first attempt!
+      },
+      telemetryComparison: null
+    };
 
     return NextResponse.json({
       type: 'incident_analysis',
-      searchResult: {
-        query: message,
-        matchCount: 0,
-        isZeroDay: true,
-        primaryIncident: fallbackIncident,
-        primaryConfidence: 0,
-        divergenceAlert: null,
-        allMatches: [],
-        rankedRecommendations: {
-          verifiedFixes: fallbackIncident.successfulMitigations,
-          redHerrings: fallbackIncident.failedMitigations
-        },
-        telemetryComparison: null
-      },
-      text: `🚨 **New Incident Encountered (First Occurrence)**\n\nThis incident has **no prior history in memory**. I have generated proposed diagnostic steps and trial mitigations below.\n\n👉 **Please test the steps and let me know which one worked** (click **"Worked"** below or tell me in chat) so I can record it in memory.`
+      searchResult,
+      text: `🚨 **New Incident Encountered (First Occurrence • AI Dynamic Analysis)**\n\nThis incident has **no prior history in memory**. I have diagnosed the root cause and proposed actionable triage steps below.\n\n👉 **Please test the steps and let me know which one worked** (click **"Worked"** below or tell me in chat). Once verified, future occurrences will automatically show empirical success scores and prevent dangerous anti-patterns.`
     });
 
   } catch (err: any) {
     console.error('Chat API error:', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({
+      error: err.message || 'An error occurred during incident analysis.'
+    }, { status: 500 });
   }
 }

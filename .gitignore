@@ -67,3 +67,6 @@ Desktop.ini
 *.db-journal
 *.sqlite
 *.sqlite3
+
+# --- Temporary Scratch Files ---
+scratch/
