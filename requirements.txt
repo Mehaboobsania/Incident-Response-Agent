@@ -2,25 +2,32 @@
 # Incident Response Agent (IRA) — Python Requirements
 # ==============================================================================
 
-# LLM Providers & AI APIs
+# LLM Providers & AI SDKs
 groq>=0.11.0
 openai>=1.50.0
 google-generativeai>=0.8.0
 
-# HTTP & API Clients
+# HTTP & Asynchronous Networking
 requests>=2.31.0
 httpx>=0.27.0
+aiohttp>=3.9.0
 
-# Environment & Data Validation
+# Environment Configuration & Data Validation
 python-dotenv>=1.0.0
 pydantic>=2.7.0
+pydantic-settings>=2.2.0
 
-# Web Framework & API Server (Python Services / Scripts)
+# Web Framework & API Server (Optional Python Services / Microservices)
 fastapi>=0.110.0
-uvicorn>=0.29.0
+uvicorn[standard]>=0.29.0
 
-# CLI & Formatting
+# Terminal UI, Rich Logging & CLI
 rich>=13.7.0
 
-# Testing
+# Data Storage & Serialization
+sqlalchemy>=2.0.0
+pyyaml>=6.0.0
+
+# Testing & Quality Assurance
 pytest>=8.0.0
+pytest-asyncio>=0.23.0
