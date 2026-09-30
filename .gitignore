@@ -70,3 +70,7 @@ Desktop.ini
 
 # --- Temporary Scratch Files ---
 scratch/
+
+article.docx
+article.node_modules
+convert_to_docx.js
